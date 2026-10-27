@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "edge_id": "tester_to_modifier",
+  "source": "tester",
+  "target": "modifier",
+  "attempt": 2,
+  "label": "Tester → Modifier: failure report artifact",
+  "created_at": "2026-10-27T08:14:52.423+00:00",
+  "payload": {
+    "attempt": 2,
+    "summary": "Teacher TB failed (Simulation); failed checks: t06_load_store, t06_load_store, t06_load_store, t06_load_store.",
+    "artifacts": {
+      "spec": "artifacts/effective_spec.md",
+      "plan": "artifacts/plan.json",
+      "rtl_manifest": "artifacts/rtl_manifest_attempt1.json",
+      "report": "tester-02/test_report.json",
+      "combined_rtl": "artifacts/generated_attempt2.sv"
+    }
+  }
+}

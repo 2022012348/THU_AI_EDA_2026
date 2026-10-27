@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "edge_id": "tester_to_summary",
+  "source": "tester",
+  "target": "summary",
+  "attempt": 3,
+  "label": "Tester → Summary: final report artifact",
+  "created_at": "2026-10-27T08:15:07.745+00:00",
+  "payload": {
+    "attempt": 3,
+    "summary": "Teacher TB passed (Simulation). Verified CPU level: L0.",
+    "artifacts": {
+      "spec": "artifacts/effective_spec.md",
+      "plan": "artifacts/plan.json",
+      "rtl_manifest": "artifacts/rtl_manifest_attempt2.json",
+      "report": "tester-03/test_report.json",
+      "combined_rtl": "artifacts/generated_attempt3.sv"
+    }
+  }
+}

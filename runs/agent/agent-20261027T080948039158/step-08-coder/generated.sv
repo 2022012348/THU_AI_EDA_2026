@@ -1,0 +1,49 @@
+module wb_stage (
+    input  logic        clk,
+    input  logic        rst_n,
+    input  logic        mem_valid,
+    input  logic [31:0] mem_wdata,
+    input  logic [4:0]  mem_rd,
+    input  logic        mem_reg_write,
+    input  logic        mem_is_ecall,
+    input  logic [31:0] x10_value,
+    output logic        mem_wb_valid,
+    output logic        mem_wb_reg_write,
+    output logic [4:0]  mem_wb_rd,
+    output logic [31:0] mem_wb_wdata,
+    output logic        wb_we,
+    output logic [4:0]  wb_rd,
+    output logic [31:0] wb_wdata,
+    output logic        halted,
+    output logic [31:0] exit_code
+);
+
+    logic        mem_wb_is_ecall;
+
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            mem_wb_valid     <= 1'b0;
+            mem_wb_reg_write <= 1'b0;
+            mem_wb_rd        <= 5'd0;
+            mem_wb_wdata     <= 32'd0;
+            mem_wb_is_ecall  <= 1'b0;
+            halted           <= 1'b0;
+            exit_code        <= 32'd0;
+        end else if (!halted) begin
+            mem_wb_valid     <= mem_valid;
+            mem_wb_reg_write <= mem_reg_write;
+            mem_wb_rd        <= mem_rd;
+            mem_wb_wdata     <= mem_wdata;
+            mem_wb_is_ecall  <= mem_is_ecall;
+            if (mem_valid && mem_is_ecall) begin
+                halted    <= 1'b1;
+                exit_code <= x10_value;
+            end
+        end
+    end
+
+    assign wb_we    = mem_wb_valid && mem_wb_reg_write && (mem_wb_rd != 5'd0) && !halted;
+    assign wb_rd    = mem_wb_rd;
+    assign wb_wdata = mem_wb_wdata;
+
+endmodule

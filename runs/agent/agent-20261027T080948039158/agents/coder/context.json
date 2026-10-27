@@ -1,0 +1,5 @@
+{
+  "plan_ref": "artifacts/plan.json",
+  "last_file": "project/rtl/regfile.sv",
+  "rtl_manifest_ref": "artifacts/rtl_manifest.json"
+}

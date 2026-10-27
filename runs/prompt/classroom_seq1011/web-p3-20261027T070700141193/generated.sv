@@ -1,0 +1,83 @@
+module seq1011 (
+    input  logic clk,
+    input  logic rst_n,
+    input  logic in_valid,
+    output logic in_ready,
+    input  logic in_bit,
+    output logic out_valid,
+    input  logic out_ready,
+    output logic match
+);
+
+    typedef enum logic [1:0] {
+        S0   = 2'd0,
+        S1   = 2'd1,
+        S10  = 2'd2,
+        S101 = 2'd3
+    } state_t;
+
+    state_t state;
+
+    logic accept;
+    logic consume;
+
+    assign in_ready = rst_n && (!out_valid || out_ready);
+    assign accept   = in_valid && in_ready;
+    assign consume  = out_valid && out_ready;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state     <= S0;
+            out_valid <= 1'b0;
+            match     <= 1'b0;
+        end else begin
+            if (consume) begin
+                out_valid <= 1'b0;
+                match     <= 1'b0;
+            end
+
+            if (accept) begin
+                match <= 1'b0;
+
+                case (state)
+                    S0: begin
+                        if (in_bit)
+                            state <= S1;
+                        else
+                            state <= S0;
+                    end
+
+                    S1: begin
+                        if (in_bit)
+                            state <= S1;
+                        else
+                            state <= S10;
+                    end
+
+                    S10: begin
+                        if (in_bit)
+                            state <= S101;
+                        else
+                            state <= S0;
+                    end
+
+                    S101: begin
+                        if (in_bit) begin
+                            state <= S1;
+                            match <= 1'b1;
+                        end else begin
+                            state <= S10;
+                        end
+                    end
+
+                    default: begin
+                        state <= S0;
+                    end
+                endcase
+
+                out_valid <= 1'b1;
+            end
+        end
+    end
+
+endmodule

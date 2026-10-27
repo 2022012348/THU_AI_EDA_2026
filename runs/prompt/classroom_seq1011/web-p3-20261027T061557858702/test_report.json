@@ -1,0 +1,446 @@
+{
+  "task_name": "classroom_seq1011",
+  "rtl_path": "/Users/abel/THU_AI_EDA_2026/runs/prompt/classroom_seq1011/web-p3-20261027T061557858702/generated.sv",
+  "passed": false,
+  "stage": "simulation",
+  "return_code": 1,
+  "stdout": "AI_EDA_TRACE|cycle=2|case=reset|event=reset_applied|in_valid=0|in_ready=1|in_bit=0|out_valid=0|out_ready=1|match=0|expected_valid=0|expected_match=0\nCHECK: one_cycle_latency_no_early_output — expected out_valid=0, got 1\nAI_EDA_TRACE|cycle=4|case=overlap|event=input_0|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=0|expected_valid=0|expected_match=0\nAI_EDA_TRACE|cycle=5|case=overlap|event=input_1|in_valid=1|in_ready=1|in_bit=0|out_valid=1|out_ready=1|match=0|expected_valid=1|expected_match=0\nAI_EDA_TRACE|cycle=6|case=overlap|event=input_2|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=0|expected_valid=1|expected_match=0\nCHECK: overlap_output_2 — expected match=0, got 1\nAI_EDA_TRACE|cycle=7|case=overlap|event=input_3|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=1|expected_valid=1|expected_match=0\nCHECK: overlap_output_3 — expected match=1, got 0\nAI_EDA_TRACE|cycle=8|case=overlap|event=input_4|in_valid=1|in_ready=1|in_bit=0|out_valid=1|out_ready=1|match=0|expected_valid=1|expected_match=1\nAI_EDA_TRACE|cycle=9|case=overlap|event=input_5|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=0|expected_valid=1|expected_match=0\nCHECK: overlap_output_5 — expected match=0, got 1\nAI_EDA_TRACE|cycle=10|case=overlap|event=input_6|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=1|expected_valid=1|expected_match=0\nCHECK: overlap_output_6 — expected out_valid=1, got 0\nAI_EDA_TRACE|cycle=11|case=overlap|event=drain_6|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=1|match=1|expected_valid=1|expected_match=1\nAI_EDA_TRACE|cycle=12|case=overlap|event=drain_complete|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=1|match=1|expected_valid=0|expected_match=0\nAI_EDA_TRACE|cycle=14|case=reset|event=reset_applied|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=1|match=0|expected_valid=0|expected_match=0\nCHECK: match_latency_0 — expected out_valid=0, got 1\nAI_EDA_TRACE|cycle=16|case=match|event=input_0|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=0|expected_valid=0|expected_match=0\nAI_EDA_TRACE|cycle=17|case=match|event=input_1|in_valid=1|in_ready=1|in_bit=0|out_valid=1|out_ready=1|match=0|expected_valid=1|expected_match=0\nAI_EDA_TRACE|cycle=18|case=match|event=input_2|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=0|expected_valid=1|expected_match=0\nCHECK: match_output_2 — expected match=0, got 1\nAI_EDA_TRACE|cycle=19|case=match|event=input_3|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=1|expected_valid=1|expected_match=0\nCHECK: match_output_3 — expected out_valid=1, got 0\nAI_EDA_TRACE|cycle=20|case=match|event=drain_match|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=1|match=1|expected_valid=1|expected_match=1\nCHECK: backpressure_hold — out_valid or match changed while out_ready=0\nAI_EDA_TRACE|cycle=21|case=backpressure|event=hold|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=0|match=1|expected_valid=1|expected_match=1\nCHECK: backpressure_hold — out_valid or match changed while out_ready=0\nAI_EDA_TRACE|cycle=22|case=backpressure|event=hold|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=0|match=1|expected_valid=1|expected_match=1\nAI_EDA_TRACE|cycle=23|case=backpressure|event=release|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=1|match=1|expected_valid=0|expected_match=0\nAI_EDA_TRACE|cycle=24|case=backpressure|event=release_complete|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=1|match=1|expected_valid=0|expected_match=0\nAI_EDA_TRACE|cycle=26|case=reset|event=reset_applied|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=1|match=0|expected_valid=0|expected_match=0\nCHECK: match_latency_0 — expected out_valid=0, got 1\nAI_EDA_TRACE|cycle=28|case=match|event=input_0|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=0|expected_valid=0|expected_match=0\nAI_EDA_TRACE|cycle=29|case=match|event=input_1|in_valid=1|in_ready=1|in_bit=0|out_valid=1|out_ready=1|match=0|expected_valid=1|expected_match=0\nAI_EDA_TRACE|cycle=30|case=match|event=input_2|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=0|expected_valid=1|expected_match=0\nCHECK: match_output_2 — expected match=0, got 1\nAI_EDA_TRACE|cycle=31|case=match|event=input_3|in_valid=1|in_ready=1|in_bit=1|out_valid=1|out_ready=1|match=1|expected_valid=1|expected_match=0\nCHECK: match_output_3 — expected out_valid=1, got 0\nAI_EDA_TRACE|cycle=32|case=match|event=drain_match|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=1|match=1|expected_valid=1|expected_match=1\nCHECK: synchronous_reset_midcycle — output changed before reset clock edge\nAI_EDA_TRACE|cycle=32|case=sync_reset|event=midcycle|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=0|match=0|expected_valid=1|expected_match=1\nAI_EDA_TRACE|cycle=33|case=sync_reset|event=clock_edge|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=0|match=0|expected_valid=0|expected_match=0\nAI_EDA_TRACE|cycle=34|case=sync_reset|event=released|in_valid=0|in_ready=1|in_bit=1|out_valid=0|out_ready=1|match=0|expected_valid=0|expected_match=0\nLAB_RESULT: FAIL (14 checks)\nFATAL: /Users/abel/THU_AI_EDA_2026/content/tasks/classroom_seq1011/tb.sv:178: \n       Time: 336000  Scope: tb_classroom_seq1011\n",
+  "stderr": "",
+  "trace": [
+    {
+      "cycle": 2,
+      "case": "reset",
+      "event": "reset_applied",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "0",
+      "out_valid": "0",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "0",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 4,
+      "case": "overlap",
+      "event": "input_0",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "0",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 5,
+      "case": "overlap",
+      "event": "input_1",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "0",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 6,
+      "case": "overlap",
+      "event": "input_2",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 7,
+      "case": "overlap",
+      "event": "input_3",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "1",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 8,
+      "case": "overlap",
+      "event": "input_4",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "0",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "1",
+      "expected_match": "1"
+    },
+    {
+      "cycle": 9,
+      "case": "overlap",
+      "event": "input_5",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 10,
+      "case": "overlap",
+      "event": "input_6",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "1",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 11,
+      "case": "overlap",
+      "event": "drain_6",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "1",
+      "match": "1",
+      "expected_valid": "1",
+      "expected_match": "1"
+    },
+    {
+      "cycle": 12,
+      "case": "overlap",
+      "event": "drain_complete",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "1",
+      "match": "1",
+      "expected_valid": "0",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 14,
+      "case": "reset",
+      "event": "reset_applied",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "0",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 16,
+      "case": "match",
+      "event": "input_0",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "0",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 17,
+      "case": "match",
+      "event": "input_1",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "0",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 18,
+      "case": "match",
+      "event": "input_2",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 19,
+      "case": "match",
+      "event": "input_3",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "1",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 20,
+      "case": "match",
+      "event": "drain_match",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "1",
+      "match": "1",
+      "expected_valid": "1",
+      "expected_match": "1"
+    },
+    {
+      "cycle": 21,
+      "case": "backpressure",
+      "event": "hold",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "0",
+      "match": "1",
+      "expected_valid": "1",
+      "expected_match": "1"
+    },
+    {
+      "cycle": 22,
+      "case": "backpressure",
+      "event": "hold",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "0",
+      "match": "1",
+      "expected_valid": "1",
+      "expected_match": "1"
+    },
+    {
+      "cycle": 23,
+      "case": "backpressure",
+      "event": "release",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "1",
+      "match": "1",
+      "expected_valid": "0",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 24,
+      "case": "backpressure",
+      "event": "release_complete",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "1",
+      "match": "1",
+      "expected_valid": "0",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 26,
+      "case": "reset",
+      "event": "reset_applied",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "0",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 28,
+      "case": "match",
+      "event": "input_0",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "0",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 29,
+      "case": "match",
+      "event": "input_1",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "0",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 30,
+      "case": "match",
+      "event": "input_2",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 31,
+      "case": "match",
+      "event": "input_3",
+      "in_valid": "1",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "1",
+      "out_ready": "1",
+      "match": "1",
+      "expected_valid": "1",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 32,
+      "case": "match",
+      "event": "drain_match",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "1",
+      "match": "1",
+      "expected_valid": "1",
+      "expected_match": "1"
+    },
+    {
+      "cycle": 32,
+      "case": "sync_reset",
+      "event": "midcycle",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "0",
+      "match": "0",
+      "expected_valid": "1",
+      "expected_match": "1"
+    },
+    {
+      "cycle": 33,
+      "case": "sync_reset",
+      "event": "clock_edge",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "0",
+      "match": "0",
+      "expected_valid": "0",
+      "expected_match": "0"
+    },
+    {
+      "cycle": 34,
+      "case": "sync_reset",
+      "event": "released",
+      "in_valid": "0",
+      "in_ready": "1",
+      "in_bit": "1",
+      "out_valid": "0",
+      "out_ready": "1",
+      "match": "0",
+      "expected_valid": "0",
+      "expected_match": "0"
+    }
+  ],
+  "checks": [
+    {
+      "name": "one_cycle_latency_no_early_output",
+      "detail": "expected out_valid=0, got 1"
+    },
+    {
+      "name": "overlap_output_2",
+      "detail": "expected match=0, got 1"
+    },
+    {
+      "name": "overlap_output_3",
+      "detail": "expected match=1, got 0"
+    },
+    {
+      "name": "overlap_output_5",
+      "detail": "expected match=0, got 1"
+    },
+    {
+      "name": "overlap_output_6",
+      "detail": "expected out_valid=1, got 0"
+    },
+    {
+      "name": "match_latency_0",
+      "detail": "expected out_valid=0, got 1"
+    },
+    {
+      "name": "match_output_2",
+      "detail": "expected match=0, got 1"
+    },
+    {
+      "name": "match_output_3",
+      "detail": "expected out_valid=1, got 0"
+    },
+    {
+      "name": "backpressure_hold",
+      "detail": "out_valid or match changed while out_ready=0"
+    },
+    {
+      "name": "backpressure_hold",
+      "detail": "out_valid or match changed while out_ready=0"
+    },
+    {
+      "name": "match_latency_0",
+      "detail": "expected out_valid=0, got 1"
+    },
+    {
+      "name": "match_output_2",
+      "detail": "expected match=0, got 1"
+    },
+    {
+      "name": "match_output_3",
+      "detail": "expected out_valid=1, got 0"
+    },
+    {
+      "name": "synchronous_reset_midcycle",
+      "detail": "output changed before reset clock edge"
+    }
+  ]
+}

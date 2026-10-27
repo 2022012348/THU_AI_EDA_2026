@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "edge_id": "tester_to_modifier",
+  "source": "tester",
+  "target": "modifier",
+  "attempt": 1,
+  "label": "Tester → Modifier: failure report artifact",
+  "created_at": "2026-10-27T08:13:49.276+00:00",
+  "payload": {
+    "attempt": 1,
+    "summary": "Teacher TB failed (Simulation); failed checks: t02_alu_r, t02_alu_r, t02_alu_r, t03_alu_imm.",
+    "artifacts": {
+      "spec": "artifacts/effective_spec.md",
+      "plan": "artifacts/plan.json",
+      "rtl_manifest": "artifacts/rtl_manifest.json",
+      "report": "tester-01/test_report.json",
+      "combined_rtl": "artifacts/generated_attempt1.sv"
+    }
+  }
+}

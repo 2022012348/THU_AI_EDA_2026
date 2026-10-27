@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "edge_id": "modifier_to_tester",
+  "source": "modifier",
+  "target": "tester",
+  "attempt": 2,
+  "label": "Modifier → Tester: updated RTL manifest",
+  "created_at": "2026-10-27T08:15:04.029+00:00",
+  "payload": {
+    "attempt": 2,
+    "changed_paths": [
+      "rtl/mem_stage.sv"
+    ],
+    "notes": "Root cause of t06_load_store failures: load byte/half selection ignored the low address bits. LB/LBU always took dmem_rdata[7:0] and LH/LHU only used addr[1], so byte loads at addr[1:0]!=0 returned the wrong lane (x4..x8, x19, x23 all got 0x01/0x00 instead of the stored byte). Fix: compute load_byte via a 4-way mux on em_alu_result[1:0] (little-endian lane select) and load_half via addr[1], then apply sign/zero extension per funct3. This also corrects t06b_neg_imm and the crc32 benchmark which depend on correct byte/half loads. Store path (SB/SH byte enables and replicated wdata) was already correct and is unchanged.",
+    "artifacts": {
+      "spec": "artifacts/effective_spec.md",
+      "plan": "artifacts/plan.json",
+      "rtl_manifest": "artifacts/rtl_manifest_attempt2.json"
+    }
+  }
+}

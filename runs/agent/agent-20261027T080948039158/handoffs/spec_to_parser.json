@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "edge_id": "spec_to_parser",
+  "source": "spec",
+  "target": "parser",
+  "attempt": null,
+  "label": "Input Spec → Parser: Spec artifact",
+  "created_at": "2026-10-27T08:09:48.044+00:00",
+  "payload": {
+    "task": "rv32i5",
+    "artifacts": {
+      "spec": "artifacts/spec.md"
+    }
+  }
+}

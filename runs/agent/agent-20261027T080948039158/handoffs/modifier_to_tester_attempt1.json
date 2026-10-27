@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "edge_id": "modifier_to_tester",
+  "source": "modifier",
+  "target": "tester",
+  "attempt": 1,
+  "label": "Modifier → Tester: updated RTL manifest",
+  "created_at": "2026-10-27T08:14:48.723+00:00",
+  "payload": {
+    "attempt": 1,
+    "changed_paths": [
+      "rtl/ex_stage.sv"
+    ],
+    "notes": "Real root cause: forwarding encoding mismatch. The frozen plan defines fwd 2'b01=EX/MEM and 2'b10=MEM/WB, and forwarding_unit already emits 2'b01 for EX/MEM and 2'b10 for MEM/WB. But ex_stage's mux was inverted: it selected ex_mem_alu_result on fwd==2'b10 and mem_wb_wdata on fwd==2'b01. So EX/MEM ALU results were taken from the stale MEM/WB value and vice versa, corrupting all dependent ALU/I-type/forward/load-store results and the ECALL path (halt timeout). Fix: correct ex_stage forwarding mux to select ex_mem_alu_result on fwd==2'b01 and mem_wb_wdata on fwd==2'b10, matching the plan and forwarding_unit. forwarding_unit.sv is returned unchanged (already correct) to keep the patch set explicit; ex_stage.sv is the file that actually changes.",
+    "artifacts": {
+      "spec": "artifacts/effective_spec.md",
+      "plan": "artifacts/plan.json",
+      "rtl_manifest": "artifacts/rtl_manifest_attempt1.json"
+    }
+  }
+}

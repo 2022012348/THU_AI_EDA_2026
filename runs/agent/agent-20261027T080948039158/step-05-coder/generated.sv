@@ -1,0 +1,298 @@
+module id_stage (
+    input  logic        clk,
+    input  logic        rst_n,
+    input  logic        halt,
+    input  logic        flush,
+    input  logic        stall,
+    input  logic        if_valid,
+    input  logic [31:0] if_pc,
+    input  logic [31:0] if_pc_plus4,
+    input  logic [31:0] if_instr,
+    input  logic [31:0] rs1_data,
+    input  logic [31:0] rs2_data,
+    output logic [4:0]  rs1_addr,
+    output logic [4:0]  rs2_addr,
+    output logic        id_valid,
+    output logic [31:0] id_pc,
+    output logic [31:0] id_pc_plus4,
+    output logic [31:0] id_rs1_data,
+    output logic [31:0] id_rs2_data,
+    output logic [4:0]  id_rs1_addr,
+    output logic [4:0]  id_rs2_addr,
+    output logic [31:0] id_imm,
+    output logic [4:0]  id_rd,
+    output logic [3:0]  id_alu_op,
+    output logic        id_alu_a_sel,
+    output logic        id_alu_b_sel,
+    output logic        id_reg_write,
+    output logic        id_is_load,
+    output logic        id_is_store,
+    output logic        id_mem_to_reg,
+    output logic [2:0]  id_br_op,
+    output logic        id_is_branch,
+    output logic        id_is_jal,
+    output logic        id_is_jalr,
+    output logic        id_is_ecall,
+    output logic [2:0]  id_funct3,
+    output logic        id_uses_rs1,
+    output logic        id_uses_rs2
+);
+
+    localparam logic [3:0] ALU_ADD  = 4'd0;
+    localparam logic [3:0] ALU_SUB  = 4'd1;
+    localparam logic [3:0] ALU_SLL  = 4'd2;
+    localparam logic [3:0] ALU_SLT  = 4'd3;
+    localparam logic [3:0] ALU_SLTU = 4'd4;
+    localparam logic [3:0] ALU_XOR  = 4'd5;
+    localparam logic [3:0] ALU_SRL  = 4'd6;
+    localparam logic [3:0] ALU_SRA  = 4'd7;
+    localparam logic [3:0] ALU_OR   = 4'd8;
+    localparam logic [3:0] ALU_AND  = 4'd9;
+    localparam logic [3:0] ALU_PASS = 4'd10;
+
+    localparam logic [6:0] OP_RTYPE  = 7'b0110011;
+    localparam logic [6:0] OP_ITYPE  = 7'b0010011;
+    localparam logic [6:0] OP_LOAD   = 7'b0000011;
+    localparam logic [6:0] OP_STORE  = 7'b0100011;
+    localparam logic [6:0] OP_BRANCH = 7'b1100011;
+    localparam logic [6:0] OP_JAL    = 7'b1101111;
+    localparam logic [6:0] OP_JALR   = 7'b1100111;
+    localparam logic [6:0] OP_LUI    = 7'b0110111;
+    localparam logic [6:0] OP_AUIPC  = 7'b0010111;
+    localparam logic [6:0] OP_SYSTEM = 7'b1110011;
+
+    logic        id_valid_r;
+    logic [31:0] id_pc_r;
+    logic [31:0] id_pc_plus4_r;
+    logic [31:0] id_instr_r;
+
+    logic [6:0]  opcode;
+    logic [2:0]  funct3;
+    logic [6:0]  funct7;
+    logic [4:0]  rd_dec;
+    logic [4:0]  rs1_dec;
+    logic [4:0]  rs2_dec;
+
+    logic [31:0] imm_i;
+    logic [31:0] imm_s;
+    logic [31:0] imm_b;
+    logic [31:0] imm_u;
+    logic [31:0] imm_j;
+    logic [31:0] imm_sel;
+
+    logic [3:0]  alu_op_c;
+    logic        alu_a_sel_c;
+    logic        alu_b_sel_c;
+    logic        reg_write_c;
+    logic        is_load_c;
+    logic        is_store_c;
+    logic        mem_to_reg_c;
+    logic [2:0]  br_op_c;
+    logic        is_branch_c;
+    logic        is_jal_c;
+    logic        is_jalr_c;
+    logic        is_ecall_c;
+    logic        uses_rs1_c;
+    logic        uses_rs2_c;
+
+    assign opcode = id_instr_r[6:0];
+    assign funct3 = id_instr_r[14:12];
+    assign funct7 = id_instr_r[31:25];
+    assign rd_dec  = id_instr_r[11:7];
+    assign rs1_dec = id_instr_r[19:15];
+    assign rs2_dec = id_instr_r[24:20];
+
+    assign imm_i = {{20{id_instr_r[31]}}, id_instr_r[31:20]};
+    assign imm_s = {{20{id_instr_r[31]}}, id_instr_r[31:25], id_instr_r[11:7]};
+    assign imm_b = {{19{id_instr_r[31]}}, id_instr_r[31], id_instr_r[7],
+                    id_instr_r[30:25], id_instr_r[11:8], 1'b0};
+    assign imm_u = {id_instr_r[31:12], 12'b0};
+    assign imm_j = {{11{id_instr_r[31]}}, id_instr_r[31], id_instr_r[19:12],
+                    id_instr_r[20], id_instr_r[30:21], 1'b0};
+
+    always_comb begin
+        imm_sel = 32'b0;
+        case (opcode)
+            OP_ITYPE, OP_LOAD, OP_JALR: imm_sel = imm_i;
+            OP_STORE:                   imm_sel = imm_s;
+            OP_BRANCH:                  imm_sel = imm_b;
+            OP_LUI, OP_AUIPC:           imm_sel = imm_u;
+            OP_JAL:                     imm_sel = imm_j;
+            default:                    imm_sel = 32'b0;
+        endcase
+    end
+
+    always_comb begin
+        alu_op_c    = ALU_ADD;
+        alu_a_sel_c = 1'b0;
+        alu_b_sel_c = 1'b0;
+        reg_write_c = 1'b0;
+        is_load_c   = 1'b0;
+        is_store_c  = 1'b0;
+        mem_to_reg_c= 1'b0;
+        br_op_c     = 3'b0;
+        is_branch_c = 1'b0;
+        is_jal_c    = 1'b0;
+        is_jalr_c   = 1'b0;
+        is_ecall_c  = 1'b0;
+        uses_rs1_c  = 1'b0;
+        uses_rs2_c  = 1'b0;
+
+        case (opcode)
+            OP_RTYPE: begin
+                reg_write_c = 1'b1;
+                uses_rs1_c  = 1'b1;
+                uses_rs2_c  = 1'b1;
+                alu_b_sel_c = 1'b0;
+                case (funct3)
+                    3'b000: alu_op_c = funct7[5] ? ALU_SUB : ALU_ADD;
+                    3'b001: alu_op_c = ALU_SLL;
+                    3'b010: alu_op_c = ALU_SLT;
+                    3'b011: alu_op_c = ALU_SLTU;
+                    3'b100: alu_op_c = ALU_XOR;
+                    3'b101: alu_op_c = funct7[5] ? ALU_SRA : ALU_SRL;
+                    3'b110: alu_op_c = ALU_OR;
+                    3'b111: alu_op_c = ALU_AND;
+                    default: alu_op_c = ALU_ADD;
+                endcase
+            end
+            OP_ITYPE: begin
+                reg_write_c = 1'b1;
+                uses_rs1_c  = 1'b1;
+                alu_b_sel_c = 1'b1;
+                case (funct3)
+                    3'b000: alu_op_c = ALU_ADD;
+                    3'b001: alu_op_c = ALU_SLL;
+                    3'b010: alu_op_c = ALU_SLT;
+                    3'b011: alu_op_c = ALU_SLTU;
+                    3'b100: alu_op_c = ALU_XOR;
+                    3'b101: alu_op_c = funct7[5] ? ALU_SRA : ALU_SRL;
+                    3'b110: alu_op_c = ALU_OR;
+                    3'b111: alu_op_c = ALU_AND;
+                    default: alu_op_c = ALU_ADD;
+                endcase
+            end
+            OP_LOAD: begin
+                reg_write_c = 1'b1;
+                is_load_c   = 1'b1;
+                mem_to_reg_c= 1'b1;
+                uses_rs1_c  = 1'b1;
+                alu_op_c    = ALU_ADD;
+                alu_b_sel_c = 1'b1;
+            end
+            OP_STORE: begin
+                is_store_c  = 1'b1;
+                uses_rs1_c  = 1'b1;
+                uses_rs2_c  = 1'b1;
+                alu_op_c    = ALU_ADD;
+                alu_b_sel_c = 1'b1;
+            end
+            OP_BRANCH: begin
+                is_branch_c = 1'b1;
+                uses_rs1_c  = 1'b1;
+                uses_rs2_c  = 1'b1;
+                alu_op_c    = ALU_SUB;
+                alu_b_sel_c = 1'b0;
+                case (funct3)
+                    3'b000: br_op_c = 3'd0;
+                    3'b001: br_op_c = 3'd1;
+                    3'b100: br_op_c = 3'd2;
+                    3'b101: br_op_c = 3'd3;
+                    3'b110: br_op_c = 3'd4;
+                    3'b111: br_op_c = 3'd5;
+                    default: br_op_c = 3'd0;
+                endcase
+            end
+            OP_JAL: begin
+                is_jal_c    = 1'b1;
+                reg_write_c = 1'b1;
+                alu_op_c    = ALU_ADD;
+                alu_a_sel_c = 1'b1;
+                alu_b_sel_c = 1'b1;
+            end
+            OP_JALR: begin
+                is_jalr_c   = 1'b1;
+                reg_write_c = 1'b1;
+                uses_rs1_c  = 1'b1;
+                alu_op_c    = ALU_ADD;
+                alu_b_sel_c = 1'b1;
+            end
+            OP_LUI: begin
+                reg_write_c = 1'b1;
+                alu_op_c    = ALU_PASS;
+                alu_b_sel_c = 1'b1;
+            end
+            OP_AUIPC: begin
+                reg_write_c = 1'b1;
+                alu_op_c    = ALU_ADD;
+                alu_a_sel_c = 1'b1;
+                alu_b_sel_c = 1'b1;
+            end
+            OP_SYSTEM: begin
+                if (id_instr_r == 32'h0000_0073) begin
+                    is_ecall_c = 1'b1;
+                end
+            end
+            default: begin
+            end
+        endcase
+    end
+
+    assign rs1_addr = rs1_dec;
+    assign rs2_addr = rs2_dec;
+
+    assign id_valid      = id_valid_r;
+    assign id_pc         = id_pc_r;
+    assign id_pc_plus4   = id_pc_plus4_r;
+    assign id_rs1_data   = rs1_data;
+    assign id_rs2_data   = rs2_data;
+    assign id_rs1_addr   = rs1_dec;
+    assign id_rs2_addr   = rs2_dec;
+    assign id_imm        = imm_sel;
+    assign id_rd         = rd_dec;
+    assign id_alu_op     = alu_op_c;
+    assign id_alu_a_sel  = alu_a_sel_c;
+    assign id_alu_b_sel  = alu_b_sel_c;
+    assign id_reg_write  = reg_write_c;
+    assign id_is_load    = is_load_c;
+    assign id_is_store   = is_store_c;
+    assign id_mem_to_reg = mem_to_reg_c;
+    assign id_br_op      = br_op_c;
+    assign id_is_branch  = is_branch_c;
+    assign id_is_jal     = is_jal_c;
+    assign id_is_jalr    = is_jalr_c;
+    assign id_is_ecall   = is_ecall_c;
+    assign id_funct3     = funct3;
+    assign id_uses_rs1   = uses_rs1_c;
+    assign id_uses_rs2   = uses_rs2_c;
+
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            id_valid_r    <= 1'b0;
+            id_pc_r       <= 32'b0;
+            id_pc_plus4_r <= 32'b0;
+            id_instr_r    <= 32'b0;
+        end else if (halt) begin
+            id_valid_r    <= id_valid_r;
+            id_pc_r       <= id_pc_r;
+            id_pc_plus4_r <= id_pc_plus4_r;
+            id_instr_r    <= id_instr_r;
+        end else if (flush) begin
+            id_valid_r    <= 1'b0;
+            id_pc_r       <= 32'b0;
+            id_pc_plus4_r <= 32'b0;
+            id_instr_r    <= 32'b0;
+        end else if (stall) begin
+            id_valid_r    <= id_valid_r;
+            id_pc_r       <= id_pc_r;
+            id_pc_plus4_r <= id_pc_plus4_r;
+            id_instr_r    <= id_instr_r;
+        end else begin
+            id_valid_r    <= if_valid;
+            id_pc_r       <= if_pc;
+            id_pc_plus4_r <= if_pc_plus4;
+            id_instr_r    <= if_instr;
+        end
+    end
+
+endmodule

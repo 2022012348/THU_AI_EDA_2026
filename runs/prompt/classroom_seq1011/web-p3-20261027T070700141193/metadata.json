@@ -1,0 +1,28 @@
+{
+  "task_name": "classroom_seq1011",
+  "spec_path": "/Users/abel/THU_AI_EDA_2026/content/tasks/classroom_seq1011/spec.md",
+  "testbench_path": "/Users/abel/THU_AI_EDA_2026/content/tasks/classroom_seq1011/tb.sv",
+  "testbench_top": "tb_classroom_seq1011",
+  "timeout_seconds": 20,
+  "task_spec_sha256": "3432731e24e436fb723b62fa66c15ef7bd5b7f7256e273eacb588ea5b0556210",
+  "prompt_source": "/Users/abel/THU_AI_EDA_2026/content/prompts/classroom/P3_handshake_and_reset.md",
+  "prompt_sha256": "a2632a22722a446d9dc529a4dd283c98552098edbff11514962b14d8796b4b1c",
+  "raw_response_sha256": "a1055054305effb70d4f942d6eb3e005430b189d5b59ff1bcdfb1ce1f6832e01",
+  "reasoning_available": true,
+  "rtl_sha256": "809302c4c5a5160a2fa6e40f964dff7ef8f6f429167e146941eef7ccd6b492d8",
+  "model": "deepseek-flash",
+  "base_url": "https://api.deepseek.com",
+  "thinking": true,
+  "reasoning_effort": "max",
+  "temperature": null,
+  "max_tokens": 16000,
+  "created_at": "2026-10-27T07:07:54.418410+00:00",
+  "generation_mode": "single_call_streamed",
+  "finish_reason": "stop",
+  "usage": {
+    "prompt_tokens": 294,
+    "completion_tokens": 8597,
+    "total_tokens": 8891
+  },
+  "tested": false
+}

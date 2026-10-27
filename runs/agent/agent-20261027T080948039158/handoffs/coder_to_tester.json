@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "edge_id": "coder_to_tester",
+  "source": "coder",
+  "target": "tester",
+  "attempt": null,
+  "label": "Coder → Tester: RTL manifest",
+  "created_at": "2026-10-27T08:13:46.156+00:00",
+  "payload": {
+    "artifacts": {
+      "spec": "artifacts/effective_spec.md",
+      "plan": "artifacts/plan.json",
+      "rtl_manifest": "artifacts/rtl_manifest.json"
+    }
+  }
+}

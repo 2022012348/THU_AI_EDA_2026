@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "edge_id": "planner_to_coder",
+  "source": "planner",
+  "target": "coder",
+  "attempt": null,
+  "label": "Planner → Coder: Spec / Plan artifacts",
+  "created_at": "2026-10-27T08:12:25.677+00:00",
+  "payload": {
+    "artifacts": {
+      "spec": "artifacts/effective_spec.md",
+      "plan": "artifacts/plan.json"
+    }
+  }
+}

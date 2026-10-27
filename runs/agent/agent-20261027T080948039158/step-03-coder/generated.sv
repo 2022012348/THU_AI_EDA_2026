@@ -1,0 +1,318 @@
+module rv32i5 (
+    input  logic        clk,
+    input  logic        rst_n,
+    output logic [31:0] imem_addr,
+    input  logic [31:0] imem_rdata,
+    output logic        dmem_valid,
+    output logic        dmem_we,
+    output logic [31:0] dmem_addr,
+    output logic [31:0] dmem_wdata,
+    output logic [3:0]  dmem_be,
+    input  logic [31:0] dmem_rdata,
+    input  logic [4:0]  dbg_reg_addr,
+    output logic [31:0] dbg_reg_data,
+    output logic        halted,
+    output logic [31:0] exit_code
+);
+
+    // IF stage outputs
+    logic        if_valid;
+    logic [31:0] if_pc;
+    logic [31:0] if_pc_plus4;
+    logic [31:0] if_instr;
+
+    // ID stage outputs
+    logic [4:0]  rs1_addr;
+    logic [4:0]  rs2_addr;
+    logic [31:0] rs1_data;
+    logic [31:0] rs2_data;
+    logic        id_valid;
+    logic [31:0] id_pc;
+    logic [31:0] id_pc_plus4;
+    logic [31:0] id_rs1_data;
+    logic [31:0] id_rs2_data;
+    logic [4:0]  id_rs1_addr;
+    logic [4:0]  id_rs2_addr;
+    logic [31:0] id_imm;
+    logic [4:0]  id_rd;
+    logic [3:0]  id_alu_op;
+    logic        id_alu_a_sel;
+    logic        id_alu_b_sel;
+    logic        id_reg_write;
+    logic        id_is_load;
+    logic        id_is_store;
+    logic        id_mem_to_reg;
+    logic [2:0]  id_br_op;
+    logic        id_is_branch;
+    logic        id_is_jal;
+    logic        id_is_jalr;
+    logic        id_is_ecall;
+    logic [2:0]  id_funct3;
+    logic        id_uses_rs1;
+    logic        id_uses_rs2;
+
+    // EX stage outputs
+    logic [4:0]  id_ex_rs1_addr;
+    logic [4:0]  id_ex_rs2_addr;
+    logic        ex_redirect;
+    logic [31:0] ex_redirect_pc;
+    logic        ex_valid;
+    logic [31:0] ex_pc_plus4;
+    logic [31:0] ex_alu_result;
+    logic [31:0] ex_store_data;
+    logic [4:0]  ex_rd;
+    logic        ex_reg_write;
+    logic        ex_is_load;
+    logic        ex_is_store;
+    logic        ex_mem_to_reg;
+    logic [2:0]  ex_funct3;
+    logic        ex_is_ecall;
+
+    // MEM stage outputs
+    logic        ex_mem_valid;
+    logic [31:0] ex_mem_alu_result;
+    logic        ex_mem_reg_write;
+    logic [4:0]  ex_mem_rd;
+    logic        ex_mem_is_load;
+    logic        mem_valid;
+    logic [31:0] mem_wdata;
+    logic [4:0]  mem_rd;
+    logic        mem_reg_write;
+    logic        mem_is_ecall;
+
+    // WB stage outputs
+    logic        mem_wb_valid;
+    logic        mem_wb_reg_write;
+    logic [4:0]  mem_wb_rd;
+    logic [31:0] mem_wb_wdata;
+    logic        wb_we;
+    logic [4:0]  wb_rd;
+    logic [31:0] wb_wdata;
+
+    // Hazard unit outputs
+    logic        stall_pc;
+    logic        flush_if_id;
+    logic        flush_id_ex;
+    logic        halt_pending;
+
+    // Forwarding unit outputs
+    logic [1:0]  fwd_a;
+    logic [1:0]  fwd_b;
+
+    // Register file x10
+    logic [31:0] x10_value;
+
+    // Internal dmem signals from mem_stage
+    logic        dmem_valid_i;
+    logic        dmem_we_i;
+
+    // Top-level combinational masking of dmem outputs
+    assign dmem_valid = dmem_valid_i & rst_n & ~halted;
+    assign dmem_we    = dmem_we_i    & rst_n & ~halted;
+
+    if_stage u_if (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .halt         (halted),
+        .stall        (stall_pc),
+        .redirect     (ex_redirect),
+        .redirect_pc  (ex_redirect_pc),
+        .imem_addr    (imem_addr),
+        .imem_rdata   (imem_rdata),
+        .if_valid     (if_valid),
+        .if_pc        (if_pc),
+        .if_pc_plus4  (if_pc_plus4),
+        .if_instr     (if_instr)
+    );
+
+    id_stage u_id (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .halt         (halted),
+        .flush        (flush_if_id),
+        .stall        (stall_pc),
+        .if_valid     (if_valid),
+        .if_pc        (if_pc),
+        .if_pc_plus4  (if_pc_plus4),
+        .if_instr     (if_instr),
+        .rs1_data     (rs1_data),
+        .rs2_data     (rs2_data),
+        .rs1_addr     (rs1_addr),
+        .rs2_addr     (rs2_addr),
+        .id_valid     (id_valid),
+        .id_pc        (id_pc),
+        .id_pc_plus4  (id_pc_plus4),
+        .id_rs1_data  (id_rs1_data),
+        .id_rs2_data  (id_rs2_data),
+        .id_rs1_addr  (id_rs1_addr),
+        .id_rs2_addr  (id_rs2_addr),
+        .id_imm       (id_imm),
+        .id_rd        (id_rd),
+        .id_alu_op    (id_alu_op),
+        .id_alu_a_sel (id_alu_a_sel),
+        .id_alu_b_sel (id_alu_b_sel),
+        .id_reg_write (id_reg_write),
+        .id_is_load   (id_is_load),
+        .id_is_store  (id_is_store),
+        .id_mem_to_reg(id_mem_to_reg),
+        .id_br_op     (id_br_op),
+        .id_is_branch (id_is_branch),
+        .id_is_jal    (id_is_jal),
+        .id_is_jalr   (id_is_jalr),
+        .id_is_ecall  (id_is_ecall),
+        .id_funct3    (id_funct3),
+        .id_uses_rs1  (id_uses_rs1),
+        .id_uses_rs2  (id_uses_rs2)
+    );
+
+    ex_stage u_ex (
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .halt            (halted),
+        .flush           (flush_id_ex),
+        .id_valid        (id_valid),
+        .id_pc           (id_pc),
+        .id_pc_plus4     (id_pc_plus4),
+        .id_rs1_data     (id_rs1_data),
+        .id_rs2_data     (id_rs2_data),
+        .id_rs1_addr     (id_rs1_addr),
+        .id_rs2_addr     (id_rs2_addr),
+        .id_imm          (id_imm),
+        .id_rd           (id_rd),
+        .id_alu_op       (id_alu_op),
+        .id_alu_a_sel    (id_alu_a_sel),
+        .id_alu_b_sel    (id_alu_b_sel),
+        .id_reg_write    (id_reg_write),
+        .id_is_load      (id_is_load),
+        .id_is_store     (id_is_store),
+        .id_mem_to_reg   (id_mem_to_reg),
+        .id_br_op        (id_br_op),
+        .id_is_branch    (id_is_branch),
+        .id_is_jal       (id_is_jal),
+        .id_is_jalr      (id_is_jalr),
+        .id_is_ecall     (id_is_ecall),
+        .id_funct3       (id_funct3),
+        .fwd_a           (fwd_a),
+        .fwd_b           (fwd_b),
+        .ex_mem_alu_result(ex_mem_alu_result),
+        .mem_wb_wdata    (mem_wb_wdata),
+        .id_ex_rs1_addr  (id_ex_rs1_addr),
+        .id_ex_rs2_addr  (id_ex_rs2_addr),
+        .ex_redirect     (ex_redirect),
+        .ex_redirect_pc  (ex_redirect_pc),
+        .ex_valid        (ex_valid),
+        .ex_pc_plus4     (ex_pc_plus4),
+        .ex_alu_result   (ex_alu_result),
+        .ex_store_data   (ex_store_data),
+        .ex_rd           (ex_rd),
+        .ex_reg_write    (ex_reg_write),
+        .ex_is_load      (ex_is_load),
+        .ex_is_store     (ex_is_store),
+        .ex_mem_to_reg   (ex_mem_to_reg),
+        .ex_funct3       (ex_funct3),
+        .ex_is_ecall     (ex_is_ecall)
+    );
+
+    mem_stage u_mem (
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .halt            (halted),
+        .ex_valid        (ex_valid),
+        .ex_pc_plus4     (ex_pc_plus4),
+        .ex_alu_result   (ex_alu_result),
+        .ex_store_data   (ex_store_data),
+        .ex_rd           (ex_rd),
+        .ex_reg_write    (ex_reg_write),
+        .ex_is_load      (ex_is_load),
+        .ex_is_store     (ex_is_store),
+        .ex_mem_to_reg   (ex_mem_to_reg),
+        .ex_funct3       (ex_funct3),
+        .ex_is_ecall     (ex_is_ecall),
+        .dmem_rdata      (dmem_rdata),
+        .dmem_valid      (dmem_valid_i),
+        .dmem_we         (dmem_we_i),
+        .dmem_addr       (dmem_addr),
+        .dmem_wdata      (dmem_wdata),
+        .dmem_be         (dmem_be),
+        .ex_mem_valid    (ex_mem_valid),
+        .ex_mem_alu_result(ex_mem_alu_result),
+        .ex_mem_reg_write(ex_mem_reg_write),
+        .ex_mem_rd       (ex_mem_rd),
+        .ex_mem_is_load  (ex_mem_is_load),
+        .mem_valid       (mem_valid),
+        .mem_wdata       (mem_wdata),
+        .mem_rd          (mem_rd),
+        .mem_reg_write   (mem_reg_write),
+        .mem_is_ecall    (mem_is_ecall)
+    );
+
+    wb_stage u_wb (
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .mem_valid       (mem_valid),
+        .mem_wdata       (mem_wdata),
+        .mem_rd          (mem_rd),
+        .mem_reg_write   (mem_reg_write),
+        .mem_is_ecall    (mem_is_ecall),
+        .x10_value       (x10_value),
+        .mem_wb_valid    (mem_wb_valid),
+        .mem_wb_reg_write(mem_wb_reg_write),
+        .mem_wb_rd       (mem_wb_rd),
+        .mem_wb_wdata    (mem_wb_wdata),
+        .wb_we           (wb_we),
+        .wb_rd           (wb_rd),
+        .wb_wdata        (wb_wdata),
+        .halted          (halted),
+        .exit_code       (exit_code)
+    );
+
+    hazard_unit u_hazard (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .halt         (halted),
+        .id_valid     (id_valid),
+        .id_rs1_addr  (id_rs1_addr),
+        .id_rs2_addr  (id_rs2_addr),
+        .id_uses_rs1  (id_uses_rs1),
+        .id_uses_rs2  (id_uses_rs2),
+        .id_is_ecall  (id_is_ecall),
+        .ex_valid     (ex_valid),
+        .ex_is_load   (ex_is_load),
+        .ex_rd        (ex_rd),
+        .ex_redirect  (ex_redirect),
+        .stall_pc     (stall_pc),
+        .flush_if_id  (flush_if_id),
+        .flush_id_ex  (flush_id_ex),
+        .halt_pending (halt_pending)
+    );
+
+    forwarding_unit u_fwd (
+        .ex_mem_valid    (ex_mem_valid),
+        .ex_mem_reg_write(ex_mem_reg_write),
+        .ex_mem_rd       (ex_mem_rd),
+        .ex_mem_is_load  (ex_mem_is_load),
+        .mem_wb_valid    (mem_wb_valid),
+        .mem_wb_reg_write(mem_wb_reg_write),
+        .mem_wb_rd       (mem_wb_rd),
+        .id_ex_rs1_addr  (id_ex_rs1_addr),
+        .id_ex_rs2_addr  (id_ex_rs2_addr),
+        .fwd_a           (fwd_a),
+        .fwd_b           (fwd_b)
+    );
+
+    regfile u_regfile (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .wb_we     (wb_we),
+        .wb_rd     (wb_rd),
+        .wb_wdata  (wb_wdata),
+        .rs1_addr  (rs1_addr),
+        .rs1_data  (rs1_data),
+        .rs2_addr  (rs2_addr),
+        .rs2_data  (rs2_data),
+        .dbg_addr  (dbg_reg_addr),
+        .dbg_data  (dbg_reg_data),
+        .x10_value (x10_value)
+    );
+
+endmodule

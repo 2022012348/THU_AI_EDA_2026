@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "edge_id": "parser_to_planner",
+  "source": "parser",
+  "target": "planner",
+  "attempt": null,
+  "label": "Parser → Planner: frozen Spec artifact",
+  "created_at": "2026-10-27T08:10:07.599+00:00",
+  "payload": {
+    "artifacts": {
+      "spec": "artifacts/effective_spec.md",
+      "parser_result": "artifacts/parser_result.json"
+    }
+  }
+}

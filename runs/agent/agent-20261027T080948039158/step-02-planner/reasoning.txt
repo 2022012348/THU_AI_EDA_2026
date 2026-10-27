@@ -1,0 +1,1174 @@
+We need to produce JSON with project_name, top_module, modules list with name, file, description, interfaces (complete port contract).
+
+We need 8 modules minimum: rv32i5, if_stage, id_stage, ex_stage, mem_stage, wb_stage, hazard_unit, forwarding_unit. Plus can add alu.sv, regfile.sv, imm_gen.sv — but keep it manageable. Let's design a clean interface contract.
+
+Design approach: pipeline registers inside stages (each stage module holds its own input pipeline register? Or top-level holds pipeline registers?). Simpler: each stage module holds its own pipeline register at its input, i.e., stage module takes "next" inputs from previous stage combinationally? That's tricky across files. Common approach: top-level declares pipeline register signals, each stage module is purely combinational taking pipeline register inputs and producing outputs, and the pipeline registers are in top-level. But then top-level has all registers — spec says "流水线寄存器建议归属于各 stage 模块" (suggested). It's a suggestion; but "顶层只负责例化与连线" — top-level only instantiates and wires. Hmm, conflict: if pipeline registers in top, top does more than wiring. Better: each stage module contains its own input pipeline register (registered inputs). E.g., if_stage holds PC register; id_stage holds IF/ID register; ex_stage holds ID/EX register; mem_stage holds EX/MEM register; wb_stage holds MEM/WB register.
+
+But then stage-to-stage: stage N combinational outputs feed stage N+1's registered inputs. Each stage registers its inputs at posedge. That works: e.g., id_stage inputs = IF outputs (pc, pc_plus4, inst, valid) and registers them into IF/ID. Outputs of id_stage = ID/EX fields (combinational decode from IF/ID register). ex_stage registers those into ID/EX. Etc.
+
+But hazard/flush control: flush signals must clear valid of the register being written at the edge. If the register lives inside the stage module, the flush/stall signals must be inputs to that module. That's fine: each stage takes stall/flush inputs.
+
+Actually simpler & cleaner: put pipeline registers in a single place... but modules must exist and be used. Let's go with registers inside stages, with each stage having:
+
+- clk, rst_n
+- flush (clear valid of its input register)
+- stall (hold register)
+... 
+
+Hmm, but the flush semantics differ: on redirect, IF/ID and ID/EX valid cleared; PC <- target. On load-use stall: PC & IF/ID hold, ID/EX valid cleared.
+
+Let's define control signals from hazard_unit:
+- `stall_if`: freeze PC and IF/ID (load-use).
+- `stall_id`: same (IF/ID hold) — combine into one `stall` signal.
+- `flush_if_id`: clear IF/ID valid.
+- `flush_id_ex`: clear ID/EX valid.
+- `redirect` (pc_sel), `redirect_pc[31:0]`.
+
+Hmm but redirect & flush overlap: on taken branch, at the clock edge PC <- target and IF/ID valid cleared and ID/EX valid cleared. So flush_if_id and flush_id_ex asserted together with redirect.
+
+We can simplify: single `flush` output of hazard_unit that clears both IF/ID and ID/EX valid, plus `stall` that freezes PC and IF/ID and clears ID/EX valid. Then PC select in if_stage: pc <= redirect ? target : (stall ? pc : pc+4). Redirect takes priority.
+
+But when redirect, IF/ID also must be cleared — flush handles it. When stall, IF/ID holds, ID/EX cleared.
+
+Actually careful: on stall, PC holds and IF/ID holds, so IF/ID keeps its instruction; ID/EX gets bubble. So the ID/EX valid clear on stall: yes.
+
+So hazard_unit outputs:
+- `stall` (freeze PC + IF/ID)
+- `flush` (clear IF/ID valid and ID/EX valid)
+
+Hmm but flush must clear both IF/ID valid and ID/EX valid. If flush is a separate signal into id_stage (which owns IF/ID) and ex_stage (which owns ID/EX), fine.
+
+Also need halt_pending: freezes PC, clears IF/ID valid each cycle, but lets ECALL flow through ID/EX... Wait, ECALL is in IF/ID at the time it's decoded. Halt-pending begins when ECALL is in ID. Then next cycle ECALL moves to ID/EX, and IF/ID gets valid=0. So halt_pending acts like: PC freeze + IF/ID next valid = 0 (each cycle), while ID/EX gets ECALL normally.
+
+But careful: if halt_pending freezes PC and clears IF/ID valid every cycle, that's equivalent to "stall + flush_if_id" but not flush_id_ex. Hmm, but ECALL must advance ID→EX→MEM→WB. Only one ECALL, so flushing IF/ID after it is fine: once ECALL moves out of ID, IF/ID valid = 0 forever. And ID/EX valid: we must not flush ID/EX in that cycle (the cycle after ECALL in ID, ECALL is in ID/EX... wait).
+
+Timeline: cycle T: ECALL in IF/ID register (id_stage input). id_stage decodes it, asserts ecall_detected at cycle T. At edge T→T+1: ID/EX gets ECALL (valid=1), IF/ID gets valid=0 (halt clears). So at edge T→T+1 we need flush of IF/ID only, not ID/EX.
+
+Then halt_pending persists. At edge T+1→T+2: IF/ID valid stays 0.
+
+So we need a separate signal `halt_stall` that: freezes PC, and clears IF/ID valid next, but doesn't clear ID/EX. But careful: on the first cycle of halt detection, ID/EX gets ECALL — normal, not cleared. Since halt_stall doesn't clear ID/EX, fine.
+
+But wait — if halt_stall clears IF/ID valid every cycle, and it's asserted at cycle T (when ECALL in ID), then IF/ID <- valid 0. Good.
+
+Alternatively simply: once halted_pending, set if_id_valid <= 0 always.
+
+Also after halted: everything freezes, dmem_valid=0, WB no writes. Simplest: `halted` signal freezes the whole pipeline (stall everything) and gate dmem_valid with ~halted & rst_n.
+
+Let's define a global `freeze` = halted (everything holds), and dmem_valid gated.
+
+OK. Now let's design ports.
+
+To reduce complexity, let's put the register file in id_stage (allowed). dbg read port in id_stage combinational → top-level passes dbg_reg_addr to id_stage, gets dbg_reg_data. And wb write port into id_stage: wb_we, wb_addr[4:0], wb_data[31:0] from wb_stage. But WB write happens at the clock edge of wb_stage's MEM/WB register... The wb_stage owns MEM/WB register and does the write? Spec says wb_stage responsible for writeback data selection, regfile write enable. But regfile in id_stage. Hmm — then wb writes to id_stage's regfile → cross-module.
+
+Option: put regfile in id_stage, and let id_stage perform the write using wb signals (wb_valid, wb_rd, wb_wdata) provided by wb_stage combinationally, with forwarding from wb to read. That's clean: wb_stage computes final writeback data (comb) from its MEM/WB register, outputs wb_we/wb_rd/wb_data; id_stage registers them? No — write must occur at same edge as wb_stage's MEM/WB register update... Actually MEM/WB register holds the values; at edge N→N+1, MEM/WB register is loaded with EX/MEM data. The write of that data should occur when it's *in* WB, i.e., at edge N+1→N+2? No.
+
+Let's think: standard: at posedge, WB stage writes rd with data from MEM/WB register, then MEM/WB register is loaded with new values (which will be written next cycle). Both at the same edge: the write uses old MEM/WB content, the register loads new. If register file write and MEM/WB register update both happen in always_ff at the same posedge, nonblocking assignments: the write uses the pre-edge value of MEM/WB. Good.
+
+So: wb_stage owns MEM/WB register; it also outputs wb_wdata etc. But the regfile is in id_stage. Then id_stage needs the pre-edge MEM/WB values, which are wb_stage's combinational outputs derived from its register — those are stable before the edge. So id_stage can do: at posedge, if (wb_we) regs[wb_rd] <= wb_data. wb_we/wb_data are combinational from wb_stage's register. That works if wb_we/wb_data are combinational outputs of wb_stage (functions of the MEM/WB register content). Yes.
+
+But then halted must gate wb_we — after halted, no writes. Since halted set at same edge as ECALL commit... ECALL has no rd write so fine. After halted, pipeline frozen, MEM/WB holds, wb_we might stay 1 → would keep writing same value to same reg each cycle. That's harmless but "WB 不得再写寄存器" — we should gate: wb_we_out = wb_we_int & ~halted. But careful: the cycle where ECALL commits, halted was 0 before the edge. Fine.
+
+Hmm, but there's a subtlety: if halted freezes all pipeline registers, and wb_we gated by halted, ok.
+
+Alternatively put wb's regfile write inside wb_stage with a write port to regfile in id... no, keep regfile in id_stage and gate.
+
+Actually cleaner alternative: put the register file in its own module `regfile.sv`, instantiated in top-level. But spec says top only instantiates and wires — that's fine, instantiation is allowed. Hmm, "顶层只负责例化与连线" — top can instantiate regfile too. But then id_stage needs read ports (rs1, rs2 addresses comb) → regfile outputs → back to id_stage. And wb writes to regfile. That's cleaner and avoids weird cross-stage.
+
+But then ID stage needs rs1/rs2 addresses; regfile read is combinational: read address comes from instruction in IF/ID which is in id_stage. So id_stage outputs rs1_addr, rs2_addr to regfile, regfile outputs rs1_data, rs2_data to id_stage. That's a combinational loop through top-level: id_stage → regfile → id_stage. No loop actually (no feedback), fine.
+
+But WB→ID bypass: regfile needs write-first behavior. If write is in regfile always_ff, and read is comb, we need bypass: read data = (we && rd==ra) ? wdata : regs[ra]. Put that inside regfile module. 
+
+Hmm, but adding a regfile module — allowed ("可增加辅助模块"). Let's do regfile.sv. That simplifies: id_stage has rs1_addr, rs2_addr outputs, rs1_data, rs2_data inputs; dbg handled by regfile? dbg_reg_addr → dbg_reg_data comb from regfile. But dbg port is top-level; we can route dbg_reg_addr to regfile and dbg_reg_data back. That works: regfile has dbg_addr input, dbg_data output.
+
+Actually spec says regfile in id is allowed but let's use separate module for clarity. Both fine. I'll use regfile.sv as a helper module.
+
+Hmm, but careful with grader: "上述 8 个文件必须存在". Extra files OK.
+
+Let me decide: modules = rv32i5, if_stage, id_stage, ex_stage, mem_stage, wb_stage, hazard_unit, forwarding_unit, regfile, alu? Let's include alu.sv too? The EX stage can do ALU inline; to keep files manageable I'll include `alu.sv`... Actually more files = more interface work. I'll include regfile.sv (needed for clean WB) and skip alu (do inside ex_stage). Hmm, but ex_stage will be big. That's OK.
+
+Let me now carefully define all interfaces.
+
+### Pipeline register contents
+
+**IF/ID register** (owned by id_stage):
+- if_id_valid
+- if_id_pc[31:0]
+- if_id_pc_plus4[31:0]
+- if_id_instr[31:0]
+
+**ID/EX register** (owned by ex_stage):
+- id_ex_valid
+- id_ex_pc[31:0]
+- id_ex_pc_plus4[31:0]
+- id_ex_rs1_data[31:0]
+- id_ex_rs2_data[31:0]
+- id_ex_rs1_addr[4:0]
+- id_ex_rs2_addr[4:0]
+- id_ex_imm[31:0]
+- id_ex_rd[4:0]
+- id_ex_alu_op[3:0]  (or [4:0])
+- id_ex_alu_src_a (0=rs1, 1=pc)  -- for AUIPC/JAL... Let's handle differently.
+- id_ex_alu_src_b (0=rs2, 1=imm)
+- id_ex_reg_write
+- id_ex_mem_read
+- id_ex_mem_write
+- id_ex_wb_sel[1:0] (00=alu, 01=mem, 10=pc+4)
+- id_ex_branch_type / is_branch, is_jal, is_jalr
+- id_ex_ecall
+
+Let's simplify alu control with a 4-bit op plus separate flags.
+
+Let me define concretely:
+
+ID/EX signals (from id_stage outputs to ex_stage inputs, registered inside ex_stage):
+- id_ex_valid : 1
+- id_ex_pc : 32
+- id_ex_pc_plus4 : 32
+- id_ex_rs1_data : 32
+- id_ex_rs2_data : 32
+- id_ex_rs1_addr : 5
+- id_ex_rs2_addr : 5
+- id_ex_imm : 32
+- id_ex_rd : 5
+- id_ex_alu_op : 4   (ADD,SUB,SLL,SLT,SLTU,XOR,SRL,SRA,OR,AND, PASS_B?) 
+- id_ex_alu_a_sel : 1  (0 = rs1, 1 = pc)
+- id_ex_alu_b_sel : 1  (0 = rs2, 1 = imm)
+- id_ex_reg_write : 1
+- id_ex_mem_read : 1
+- id_ex_mem_write : 1
+- id_ex_wb_sel : 2  (0 alu, 1 mem, 2 pc+4)
+- id_ex_br_op : 3  (branch compare type; also used for branch/jal/jalr)
+- id_ex_is_branch : 1
+- id_ex_is_jal : 1
+- id_ex_is_jalr : 1
+- id_ex_is_ecall : 1
+- id_ex_mem_funct3 : 3 (for load extension & store size)
+
+Hmm — LUI: alu_a_sel? LUI needs rd = imm. Use alu_a_sel=1 (pc)? No. LUI: alu_op = PASS_B with a_sel anything, b_sel=imm. AUIPC: a_sel=1 (pc), b_sel=1 (imm), op=ADD. Good.
+
+So alu_op 4 bits: 
+0 ADD, 1 SUB, 2 SLL, 3 SLT, 4 SLTU, 5 XOR, 6 SRL, 7 SRA, 8 OR, 9 AND, 10 PASS_B (for LUI).
+
+Branch: ex computes branch taken. Need both signed and unsigned compare plus equality. Give a 3-bit br_op:
+0 = BEQ, 1 = BNE, 2 = BLT, 3 = BGE, 4 = BLTU, 5 = BGEU, 6 = JAL, 7 = JALR? Better separate is_jal/is_jalr flags.
+
+Let's define id_ex_br_op[2:0] with 0..5 for branches; separate is_jal, is_jalr.
+
+Actually EX needs to compute target: branch/jal target = pc + imm; jalr target = (rs1_fwd + imm) & ~1. Use is_jalr to select.
+
+Let's simplify: `id_ex_is_branch`, `id_ex_is_jal`, `id_ex_is_jalr`, `id_ex_br_op[2:0]`.
+
+Redirect output from ex_stage: `ex_redirect` (1), `ex_redirect_pc[31:0]`. Plus `ex_mispredict`? Not needed.
+
+Also `ex_ecall_valid` → passed to MEM.
+
+**EX/MEM register** (owned by mem_stage):
+- ex_mem_valid
+- ex_mem_pc_plus4[31:0]  (for JAL link)  — actually link value computed in EX = pc+4; can pass as ex_mem_alu_result if wb_sel selects pc+4. Simpler: ex_stage computes alu_result; for JAL/JALR, alu_result would be... hmm. Let's have ex_stage output `ex_result[31:0]` which is the final "alu result" (for alu ops), and separately ex_mem_pc_plus4 for link. wb_sel decides.
+
+Let me just pass ex_mem_pc_plus4[31:0] and use wb_sel=2 → wdata = pc_plus4.
+
+EX/MEM signals:
+- ex_mem_valid : 1
+- ex_mem_pc_plus4 : 32
+- ex_mem_alu_result : 32
+- ex_mem_store_data : 32  (fwd'd rs2 from EX)
+- ex_mem_rs2_addr : 5
+- ex_mem_rd : 5
+- ex_mem_reg_write : 1
+- ex_mem_mem_read : 1
+- ex_mem_mem_write : 1
+- ex_mem_wb_sel : 2
+- ex_mem_mem_funct3 : 3
+- ex_mem_is_ecall : 1
+
+**MEM/WB register** (owned by wb_stage):
+- mem_wb_valid : 1
+- mem_wb_wdata : 32  (final writeback value, selected in MEM: alu, load-extended, or pc+4)
+- mem_wb_rd : 5
+- mem_wb_reg_write : 1
+- mem_wb_is_ecall : 1
+
+Then wb_stage: wb_we = mem_wb_valid & mem_wb_reg_write & (rd!=0) & ~halted; wb_rd; wb_wdata.
+
+Forwarding unit needs mem_wb info: it's inside wb_stage's register. forwarding_unit needs ex_mem (reg_write, rd, mem_read) and mem_wb (reg_write, rd, valid, wdata). So top must route wb_stage's mem_wb_* combinational outputs to forwarding_unit. Provide from wb_stage: `wb_valid`, `wb_reg_write`, `wb_rd`, `wb_wdata`. And also mem_stage needs mem_wb for store-data forwarding: mem_stage needs mem_wb_valid/reg_write/rd/wdata too.
+
+OK so wb_stage outputs (comb from its register):
+- wb_valid, wb_reg_write, wb_rd[4:0], wb_wdata[31:0]
+- wb_commit_ecall (valid & is_ecall) → to hazard/control for halted
+- halted, exit_code outputs to top.
+
+But wb_stage needs to gate writes by halted: it owns halted? halted is set by wb_stage's always_ff. Then wb_we = wb_valid & wb_reg_write & (wb_rd!=0) & ~halted. And id/regfile uses wb_we & wb_rd & wb_wdata. Good — regfile write enable = wb_we.
+
+Wait, but halted is set at the same edge the ECALL commits. Before that edge, halted=0 so wb_we for older instructions is fine. After, halted=1 and wb_we=0. 
+
+But actually careful: halted is a register in wb_stage. wb_we depends combinationally on halted, so once halted=1, wb_we=0. Good.
+
+Also need: when halted=1, everything freezes. Provide `halted` to hazard_unit? Actually freeze: if_stage holds PC, id_stage holds IF/ID and ID/EX... Let's just have each stage take `halt` input (= halted) and when halted: don't update its registers (all always_ff guarded by ~halt). Hmm, but wb_stage must still hold its regs (guard) — yes, everything frozen including mem_wb. That makes halted stable and exit_code stable.
+
+Careful: halted register itself in wb_stage: if (halted) halted <= halted (hold). Fine.
+
+But at the edge where halted becomes 1: other stages would also freeze — but they need to update normally that cycle? At that edge, the ECALL is in WB committing; the other stages hold instructions younger than ECALL — they should be squashed anyway. Freezing them is fine (they're all invalid since halt_pending cleared IF/ID and ID/EX, and EX/MEM... hmm).
+
+Wait: halt_pending. When ECALL is in ID, IF/ID valid cleared next cycle, ID/EX gets ECALL. Then next cycle ECALL in ID/EX → EX/MEM gets ECALL, ID/EX valid = 0 (IF/ID invalid → ID/EX invalid). Then EX/MEM has ECALL → MEM/WB gets ECALL, EX/MEM invalid. So by the time ECALL reaches WB, all younger stages are invalid. 
+
+So freezing everything at the halted edge is fine.
+
+Now, `halt_pending` state: where? Put in hazard_unit or a control block. hazard_unit can hold it as a register. Let's put it in hazard_unit:
+- inputs: clk, rst_n, id_ecall (ecall detected in ID & valid), ex_redirect (kill), wb_commit_ecall
+- output: halt_pending (registered), halt_stall signal.
+
+Hmm. Let's define hazard_unit outputs:
+- `stall_req` (load-use or halt_pending): freeze PC & IF/ID
+- `flush_if_id` : clear IF/ID valid next cycle
+- `flush_id_ex` : clear ID/EX valid next cycle
+
+Load-use: stall_req=1, flush_id_ex=1, flush_if_id=0.
+Redirect: flush_if_id=1, flush_id_ex=1, pc select = redirect (in if_stage).
+Halt-pending entry (ECALL in ID, no redirect): freeze PC, flush_if_id=1 (from next cycle on), no ID/EX flush.
+
+So halt_pending: once set, holds. PC frozen, IF/ID valid cleared each cycle.
+
+So: 
+- `stall_pc` = load_use_stall | halt_pending  (freeze PC)
+- `stall_if_id` = load_use_stall | halt_pending  (freeze IF/ID register)... careful: halt_pending wants IF/ID to be cleared (valid=0), not frozen with old content. So IF/ID: when halt_pending or redirect → valid<=0. When load_use_stall → hold.
+
+Let's design id_stage inputs:
+- clk, rst_n
+- `if_valid` (from if_stage), `if_pc`, `if_pc_plus4`, `if_instr`
+- `stall` (hold IF/ID register; load-use)
+- `flush` (clear IF/ID valid)
+- `halt_freeze`?? 
+
+Hmm, simpler: give id_stage a single `if_id_ctrl`? Let's use two signals: `stall_i` and `flush_i`.
+- load-use: stall_i=1, flush_i=0 → hold.
+- redirect: stall_i=0, flush_i=1 → IF/ID <= {valid=0, new if_* values} (valid cleared, data don't care).
+- halt_pending: stall_i=0, flush_i=1 → same, clear each cycle. But then IF/ID data updates with whatever IF outputs — fine since valid=0.
+
+Wait, but with halt_pending PC frozen, if_stage keeps outputting the same pc; the IF/ID register would update with the same data and valid=0. Fine.
+
+Hmm, but on redirect, we want IF/ID to take the new pc's data but valid=0 (the instruction fetched this cycle at the old pc is wrong anyway; next cycle we fetch target). Actually on redirect, PC <= target at the edge; the instruction currently at if_stage output corresponds to the wrong path. So IF/ID valid must be 0. Correct.
+
+OK so id_stage: 
+```
+if (flush) if_id_valid <= 0; else if (!stall) begin if_id_valid<=if_valid; if_id_pc<=...; end
+```
+But when flush, also need data to update? No, just clear valid, hold data. Simpler: 
+```
+if (flush) begin valid<=0; end
+else if (stall) begin /*hold*/ end
+else begin valid<=if_valid; data<=...; end
+```
+Good.
+
+Similarly ex_stage's ID/EX register:
+- `flush` (clear valid) from redirect/load-use: both clear ID/EX valid. And rst.
+- Never stalls? On load-use stall, ID/EX cleared (bubble). On redirect, cleared. Otherwise normal.
+So ex_stage just needs `flush_ex` input (clear ID/EX valid next cycle, i.e., insert bubble). Actually on load-use: ID/EX valid <= 0. On redirect: ID/EX valid <= 0. So one signal `flush_id_ex`.
+
+Hmm but careful: on load-use stall, we also want ID/EX data to hold (don't care) and valid=0. Fine.
+
+But wait: on load-use stall, the instruction in ID is held in IF/ID and gets re-decoded next cycle; ID/EX gets bubble this cycle. Correct.
+
+mem_stage: EX/MEM register never flushed (it's always valid data from older instructions)? EX/MEM just shifts. But on redirect, EX/MEM instruction is older (already in EX), so keep. Yes, EX/MEM never flushes.
+
+wb_stage: MEM/WB never flushes.
+
+Global halt: all stages hold when halted=1. Provide `halt` input to each stage; guard the always_ff.
+
+Actually if halted, mem_wb must hold (so exit... ), if_stage holds PC, etc. Alternatively, since after halted everything downstream is invalid, holding is safest. Let's give each stage a `halt` input.
+
+Alternatively, when halted, set valid=0 everywhere and hold. Simplest: `if (halt) begin /* hold */ end`.
+
+Hmm, but there's a subtlety: halt is asserted at the same edge that ECALL commits in WB. At that edge, stages update normally (except... ). Actually halted is a register that becomes 1 after that edge. So at the commit edge, halt=0 for all stages → they update normally. After the edge, halt=1 → everything holds. Wait, but wb_stage's mem_wb register: at the commit edge, mem_wb <= EX/MEM (which is... the ECALL? no). Let's trace: ECALL commits at edge N→N+1, meaning mem_wb register at cycle N holds ECALL. At edge N→N+1, mem_wb <= ex_mem (invalid). And halted <= 1. From cycle N+1, halt=1, everything holds: mem_wb stays invalid. Good.
+
+But careful about `halted <= 1` and `exit_code <= x10`: x10 is read from regfile. wb_stage needs x10 value → input `x10_value[31:0]` from regfile. But at edge N→N+1, regfile write from WB also happens at that edge (older instruction). Would that change x10 at the same edge, making read stale? The instruction older than ECALL writes x10 at edge N→N+1 in the same edge. Hmm! That's a problem: x10 read combinationally during cycle N would be the pre-edge value.
+
+Which instruction writes x10 just before ECALL? Only if the immediately preceding instruction writes x10, and it's in WB at cycle N... wait no. WB writes at edge N→N+1 use mem_wb at cycle N. The ECALL is at mem_wb at cycle N. So nothing else is in WB at cycle N. The instruction before ECALL: if it's a load to x10, it'd be in WB at cycle N-1. Fine.
+
+But the "same cycle WB write & read" issue: regfile write occurs at edge N→N+1 with wb_wdata from mem_wb(N) = ECALL (no write). So x10 read during cycle N is already final. Good.
+
+But wait: is x10 final when ECALL is in WB? The instruction immediately older than ECALL is in MEM at cycle N (ex_mem), it commits at edge N+1→N+2. Hmm! That's wrong.
+
+Let's recheck: pipeline stages at cycle N: IF, ID, EX, MEM, WB all hold different instructions. Instructions in MEM at cycle N will be in WB at cycle N+1 and commit at edge N+1→N+2. So the instruction in MEM at cycle N is *older* than the one in WB at cycle N.
+
+ECALL in WB at cycle N. Older instructions are in... nowhere, they already committed. Because ECALL was in MEM at N-1, EX at N-2, ID at N-3, IF at N-4. Older instructions are further along → already retired. So yes, when ECALL is in WB, all older instructions have committed. 
+
+Hmm wait, but that means during halt_pending, ECALL advances EX→MEM→WB, and the instructions behind it are younger (squashed). Yes.
+
+Now for x10 read: read x10 from regfile during cycle N (when ECALL is in mem_wb). At edge N→N+1, no other write occurs (only ECALL, no reg write). So the read value is final. 
+
+But there's a subtlety: the write of the instruction that was in WB at cycle N-1 (older than ECALL, e.g., a load writing x10) happens at edge N-1→N. So during cycle N, regfile already has updated x10. Good.
+
+Edge case: what if the instruction immediately older than ECALL writes x10 and it's in... it went through WB at N-1. Yes.
+
+OK. So wb_stage needs `x10_value` input (combinational from regfile).
+
+Alternative: keep a copy of x10 in wb via the forwarding... no, simpler: regfile exposes x10.
+
+Now what if there's a store in MEM when ECALL is in WB? No — everything behind ECALL is younger/squashed.
+
+Hmm, actually wait. Is that right? ECALL in ID at cycle T. Instructions in EX, MEM, WB at cycle T are older. At cycle T, halt_pending set. At edge T→T+1, IF/ID cleared, ID/EX gets ECALL. Older instructions in EX/MEM/WB continue. At cycle T+1: ECALL in EX, older instr in MEM, older older in WB. Cycle T+2: ECALL in MEM, older in WB. Cycle T+3: ECALL in WB. So at cycle T+3, all older done. ✓.
+
+But at cycle T+2, ECALL is in MEM — it must not produce dmem_valid. Since is_ecall has mem_read=0, mem_write=0, fine.
+
+Good.
+
+Now, exit_code ← x10 at the commit edge. x10 read during cycle T+3.
+
+Now: dbg_reg_data — combinational read from regfile including x0=0 (regfile holds x0 always 0, never written). Provide dbg_addr→dbg_data at top or via regfile.
+
+OK, now let's write all interfaces.
+
+### Module: rv32i5 (top)
+Ports as spec. Internal: instantiate all.
+
+### if_stage
+```
+module if_stage (
+  input  logic clk,
+  input  logic rst_n,
+  input  logic halt,          // freeze everything
+  input  logic stall,         // hold PC (load-use)
+  input  logic redirect,      // take target
+  input  logic [31:0] redirect_pc,
+  output logic [31:0] imem_addr,
+  input  logic [31:0] imem_rdata,
+  output logic if_valid,
+  output logic [31:0] if_pc,
+  output logic [31:0] if_pc_plus4,
+  output logic [31:0] if_instr
+);
+```
+PC register inside. imem_addr = pc. if_pc = pc, if_pc_plus4 = pc+4, if_instr = imem_rdata, if_valid = ~halt? Hmm.
+
+if_valid: The instruction fetched is valid unless... always valid when not halted. Actually after halt_pending, PC frozen and IF/ID is flushed by hazard unit anyway. So if_valid = 1 always (or ~halt). Let's set if_valid = ~halt & rst_n? Simpler: if_valid = 1'b1 when not halted else 0. But id_stage's flush handles.
+
+Hmm, but there's an issue: after halted, if_valid should be 0 to prevent anything. Since everything's frozen it doesn't matter. Let's do `if_valid = ~halt`.
+
+Wait, but during halt_pending, PC frozen at the ECALL's next... Let's see: when ECALL in IF/ID at cycle T, PC has already advanced to point past ECALL (PC = ecall_pc+4) at cycle T. Then halt_pending freezes PC at ecall_pc+4. Fine — spec says "PC 冻结在取到 ECALL 后的当前值".
+
+if_valid: it's simpler to make if_stage output `if_valid = ~halt`... but during rst, rst_n=0 → PC=0. Fine.
+
+Hmm, actually there's a subtlety with the redirect and flush: the hazard unit asserts flush for IF/ID and ID/EX. But if_stage's PC update:
+```
+if (!rst_n) pc <= 0;
+else if (halt) pc <= pc;
+else if (redirect) pc <= redirect_pc;
+else if (stall) pc <= pc;
+else pc <= pc + 4;
+```
+With synchronous reset: `always_ff @(posedge clk) if (!rst_n) pc <= 0; else ...`. Since rst_n is sync, this is fine.
+
+Note: rst_n must gate dmem_valid combinationally in top/mem_stage.
+
+### id_stage
+
+```
+module id_stage (
+  input  logic clk,
+  input  logic rst_n,
+  input  logic halt,
+  input  logic flush,        // clear IF/ID valid
+  input  logic stall,        // hold IF/ID
+  input  logic if_valid,
+  input  logic [31:0] if_pc,
+  input  logic [31:0] if_pc_plus4,
+  input  logic [31:0] if_instr,
+  // register file read interface
+  output logic [4:0] rs1_addr,
+  output logic [4:0] rs2_addr,
+  input  logic [31:0] rs1_data,
+  input  logic [31:0] rs2_data,
+  // ID/EX outputs
+  output logic id_valid,
+  output logic [31:0] id_pc,
+  output logic [31:0] id_pc_plus4,
+  output logic [31:0] id_rs1_data,
+  output logic [31:0] id_rs2_data,
+  output logic [4:0]  id_rs1_addr,
+  output logic [4:0]  id_rs2_addr,
+  output logic [31:0] id_imm,
+  output logic [4:0]  id_rd,
+  output logic [3:0]  id_alu_op,
+  output logic        id_alu_a_sel,
+  output logic        id_alu_b_sel,
+  output logic        id_reg_write,
+  output logic        id_mem_read,
+  output logic        id_mem_write,
+  output logic [1:0]  id_wb_sel,
+  output logic [2:0]  id_br_op,
+  output logic        id_is_branch,
+  output logic        id_is_jal,
+  output logic        id_is_jalr,
+  output logic        id_is_ecall,
+  output logic [2:0]  id_mem_funct3,
+  output logic        id_ecall,       // ECALL detected in ID (valid & ecall)
+  output logic        id_valid_out    // maybe redundant
+);
+```
+
+Hmm, `id_ecall` is the "ECALL identified in ID stage" signal for hazard unit. It equals id_valid & id_is_ecall. But id_valid here is the combinational decode of IF/ID register — the ECALL is in ID this cycle. Good.
+
+Note rs1_addr/rs2_addr: derived from instruction; for hazard unit load-use detection, the hazard unit needs ID stage rs1/rs2 addresses and whether the instruction is valid. So hazard_unit takes id_rs1_addr, id_rs2_addr, id_valid, and ex_mem load info.
+
+Wait — for load-use: EX stage load, ID stage source regs. So hazard unit needs: ex_mem_valid & ex_mem_mem_read & ex_mem_rd != 0, and id_rs1_addr/id_rs2_addr match. The EX/MEM register is in mem_stage, exposed as ex_mem_* outputs. Good.
+
+Also need to know whether ID instruction actually uses rs1/rs2 (e.g., LUI doesn't use rs1). Conservative: always check both — could cause false stalls. E.g., `lw x1, 0(x0)` followed by `lui x2, ...`: rs1_addr = 0, rs2_addr = 0, no match with x1. Fine. But `addi x3, x1, 5` uses rs1. `lui` uses neither but its rs1/rs2 fields = 0 typically... Actually the immediate is in there. Hmm, `lui x5, 0x12345`: inst[19:15] = part of imm = could equal the load's rd. That would cause a false stall — a performance issue but functionally correct (stall one cycle). Spec says "load-use 最多暂停 1 拍" - it's about the hazard. A false stall is functionally OK. But could it break CPI=1 requirement for straight-line ALU? Only if a load is followed by LUI/AUIPC/JAL. Tests likely fine. But to be safe, add `id_uses_rs1` and `id_uses_rs2` outputs from id_stage to hazard_unit. That's cleaner and cheap. Let's add them.
+
+Hmm, but adds ports. It's fine — correctness/performance matters. Let's add:
+- `output logic id_uses_rs1`
+- `output logic id_uses_rs2`
+
+Compute in id_stage from opcode.
+
+Then hazard_unit uses: load_use = ex_mem_valid & ex_mem_mem_read & (ex_mem_rd != 0) & ((id_uses_rs1 & id_rs1_addr==ex_mem_rd) | (id_uses_rs2 & id_rs2_addr==ex_mem_rd)) & id_valid.
+
+OK.
+
+### ex_stage
+
+```
+module ex_stage (
+  input  logic clk,
+  input  logic rst_n,
+  input  logic halt,
+  input  logic flush,          // clear ID/EX valid (bubble)
+  // ID/EX inputs (from id_stage)
+  input  logic id_valid,
+  input  logic [31:0] id_pc,
+  input  logic [31:0] id_pc_plus4,
+  input  logic [31:0] id_rs1_data,
+  input  logic [31:0] id_rs2_data,
+  input  logic [4:0]  id_rs1_addr,
+  input  logic [4:0]  id_rs2_addr,
+  input  logic [31:0] id_imm,
+  input  logic [4:0]  id_rd,
+  input  logic [3:0]  id_alu_op,
+  input  logic        id_alu_a_sel,
+  input  logic        id_alu_b_sel,
+  input  logic        id_reg_write,
+  input  logic        id_mem_read,
+  input  logic        id_mem_write,
+  input  logic [1:0]  id_wb_sel,
+  input  logic [2:0]  id_br_op,
+  input  logic        id_is_branch,
+  input  logic        id_is_jal,
+  input  logic        id_is_jalr,
+  input  logic        id_is_ecall,
+  input  logic [2:0]  id_mem_funct3,
+  // forwarding
+  input  logic [1:0]  fwd_a,      // 00 = id_rs1_data, 01 = ex_mem_result, 10 = wb_wdata
+  input  logic [1:0]  fwd_b,
+  input  logic [31:0] ex_mem_fwd_data,   // EX/MEM alu result for forwarding
+  input  logic [31:0] wb_fwd_data,       // MEM/WB writeback data
+  // redirect
+  output logic        ex_redirect,
+  output logic [31:0] ex_redirect_pc,
+  // EX/MEM outputs
+  output logic ex_valid,
+  output logic [31:0] ex_pc_plus4,
+  output logic [31:0] ex_alu_result,
+  output logic [31:0] ex_store_data,
+  output logic [4:0]  ex_rs2_addr,
+  output logic [4:0]  ex_rd,
+  output logic        ex_reg_write,
+  output logic        ex_mem_read,
+  output logic        ex_mem_write,
+  output logic [1:0]  ex_wb_sel,
+  output logic [2:0]  ex_mem_funct3,
+  output logic        ex_is_ecall
+);
+```
+
+Wait: `ex_mem_fwd_data` is the EX/MEM alu result which is in mem_stage's register. Cross-module naming: mem_stage exposes `ex_mem_alu_result`. Let's name the port on ex_stage as `ex_mem_alu_result_fwd`. Hmm, naming consistency: "跨模块信号在两端必须使用同名". So signal name should be the same at both ends. Let's use `ex_mem_alu_result` as the wire name connecting mem_stage output → ex_stage input & forwarding_unit input. But ex_stage also *outputs* `ex_alu_result` which goes into mem_stage. Same wire? Actually ex_stage's combinational `ex_alu_result` feeds mem_stage's EX/MEM register input; mem_stage's register output is `ex_mem_alu_result`. Different signals. Good, distinct names.
+
+So ex_stage input port named `ex_mem_alu_result` (32 bits). And `mem_wb_wdata` for the WB forward.
+
+Hmm, but mem_wb_wdata is the final writeback value in wb_stage's register. Name it `mem_wb_wdata`. 
+
+Forwarding unit: inputs `ex_mem_valid, ex_mem_reg_write, ex_mem_rd, id_rs1_addr, id_rs2_addr, mem_wb_valid, mem_wb_reg_write, mem_wb_rd`, outputs `fwd_a[1:0], fwd_b[1:0]`. Then ex_stage selects mux.
+
+Wait — forwarding conditions depend on rs1/rs2 of the *EX stage instruction*, which is `id_rs1_addr/id_rs2_addr` held in ID/EX register. Yes, forwarding_unit takes those.
+
+Hmm, but forwarding_unit is combinational and depends on EX-stage source addresses which are inside ex_stage's ID/EX register. So ex_stage must output them, or forwarding_unit takes them as inputs from ex_stage's register outputs... but ex_stage's register outputs are `id_rs1_addr` etc.? No — ex_stage's ID/EX register contents are internal. The forwarding unit needs them.
+
+Options: (a) forwarding_unit instantiated inside ex_stage — but top must instantiate it ("由顶层实例化使用"). (b) ex_stage outputs its registered source addresses.
+
+Let's have ex_stage output `ex_rs1_addr` and `ex_rs2_addr` (the registered ID/EX addresses) to forwarding_unit. Then forwarding_unit outputs fwd_a/fwd_b back into ex_stage. Combinational loop? Path: ex_rs1_addr (from register) → forwarding_unit → fwd_a → ex_stage mux → ex_alu_result. No loop since ex_rs1_addr comes from a register. ✓
+
+So ex_stage outputs:
+- `ex_rs1_addr[4:0]`, `ex_rs2_addr[4:0]` — registered. But I already had `ex_rs2_addr` as EX/MEM output for MEM store forwarding. Hmm, that's the same value (rs2 addr of the instruction in EX), which needs to pass to MEM stage for store-data forwarding. So it's both used by forwarding_unit and passed to MEM. Name conflict: if ex_stage outputs `ex_rs2_addr` and mem_stage also outputs `ex_mem_rs2_addr`, they're different signals. Let's name:
+
+- ex_stage outputs `ex_rs1_addr`, `ex_rs2_addr` (registered ID/EX addresses) → to forwarding_unit.
+- ex_stage also outputs `ex_mem_rs2_addr` (5 bits) — registered in mem_stage. Hmm, but ex_stage's output port feeding mem_stage's register input should be named same as... 
+
+Convention: signal at stage boundary = `<prev>_<next>_<field>`? That gets confusing. Let's use: each stage's output ports are named `<stage>_<field>` for combinational decode results and `<stage>_<nextstage>_<field>`... too complex.
+
+Simplify convention: stage outputs feed the next stage's input register; the registered version inside next stage is named `<a>_<b>_<field>` where a,b are the two stages. So:
+- id_stage outputs: `id_valid, id_pc, id_pc_plus4, id_rs1_data, id_rs2_data, id_rs1_addr, id_rs2_addr, id_imm, id_rd, id_alu_op, ...` → ex_stage registers them into `id_ex_*` internally. But then ex_stage's internal register is `id_ex_valid` etc. And ex_stage needs to expose `id_ex_rs1_addr` to forwarding_unit... 
+
+Ugh. Name it: ex_stage outputs `id_ex_rs1_addr` and `id_ex_rs2_addr` (registered). forwarding_unit inputs: `id_ex_rs1_addr`, `id_ex_rs2_addr`. Fine, consistent.
+
+And ex_stage also outputs to mem_stage: `ex_valid, ex_pc_plus4, ex_alu_result, ex_store_data, ex_rs2_addr, ex_rd, ex_reg_write, ex_mem_read, ex_mem_write, ex_wb_sel, ex_mem_funct3, ex_is_ecall`. mem_stage registers them into `ex_mem_*`.
+
+Hmm but `ex_rs2_addr` vs `id_ex_rs2_addr` — both exist. Fine but confusing. Since mem_stage registers ex_rs2_addr into ex_mem_rs2_addr.
+
+Hmm, wait: does mem_stage need rs2_addr? Yes for store-data forwarding: if mem_wb_valid && mem_wb_reg_write && mem_wb_rd == ex_mem_rs2_addr && !=0 → store_data = mem_wb_wdata.
+
+OK.
+
+Alternatively skip store-data forwarding and always use ex_store_data (computed in EX with forwarding). Is that sufficient? The problem case: `lw x1, 0(x0)` ; `sw x1, 4(x0)`. With load-use stall, ex gets stall so `sw` proceeds after load is in MEM/WB → EX forwarding from MEM/WB works. So actually the load-use stall handles the rs2 dependency too if we include rs2 in the load-use check. Indeed the spec's load-use condition includes rs2. So store data forwarding at MEM is only needed for the case... hmm, when would EX forwarding fail for store data? 
+
+EX/MEM forwarding: if the producer is in EX/MEM (a load), the data isn't available. That's the load-use case → stall. For non-load producers, EX/MEM forwarding works. So EX forwarding + load-use stall (including rs2) suffices! So we don't need MEM-stage store data forwarding.
+
+But spec §7.2 says store data forwarding in MEM is a feature; and §7.3 says store rs2 dependency can be eliminated by MEM forwarding "without stalling" — but also allows stalling. Since we include rs2 in load-use check, we stall one cycle for `lw; sw` with rs2. Acceptable ("若实现仍按上条暂停，同样正确").
+
+So drop ex_mem_rs2_addr and store-data forwarding. Simpler! But careful: with EX forwarding and store using fwd_b = rs2 value, store_data is correct.
+
+Wait, but there's one more case: EX/MEM producer that's a load, and the consumer is a store's rs2 that is ALSO rs1... e.g., `lw x1,0(x0); sw x1, 0(x1)`? rs1=x1 matches too → stall. Fine.
+
+So: no MEM store-data forwarding; store_data = forwarded rs2 from EX. 
+
+Hmm, but what about the case where the store's rs2 comes from an instruction 2 back that's a load still in MEM when store is in EX? E.g.:
+```
+lw x1, 0(x0)    # I1
+addi x2, x0, 0  # I2
+sw x1, 4(x0)    # I3
+```
+I3's rs2 = x1. At I3 in EX, I1 is in MEM (MEM/WB register? let's see): I1 in MEM at cycle when I2 in EX... Let's index: cycle 4: I1 in WB, I2 in MEM, I3 in EX. So I1 is in MEM/WB register → MEM/WB forwarding works. ✓
+
+And load-use: 
+```
+lw x1, 0(x0)   # I1
+sw x1, 4(x0)   # I2
+```
+I2 in ID while I1 in EX → stall detected. ✓
+
+Good, so we can drop store-data forwarding entirely. That removes ex_mem_rs2_addr. 
+
+But wait — the spec explicitly lists store data forwarding in MEM. It says "store data 在 MEM 级前递" as a requirement in §7.2. Hmm. Is it a hard requirement? It says 需要 (needs to). But §7.3 explicitly allows stalling instead. I think it's fine to omit; the checker is the external TB. To be safe and to match spec more closely, maybe include it — it's cheap: mem_stage takes ex_mem_rs2_addr and mem_wb_* and selects. Adds ports but no risk.
+
+I'll include it: it's more spec-compliant and avoids any question. Cost: mem_stage has ex_mem_rs2_addr input and mem_wb reg/wdata inputs.
+
+Hmm, but risk: if the Coder gets it wrong. Let's include but describe clearly. Actually, including it means the load-use stall for store rs2 is not needed... but §7.3 says both OK. Let's keep load-use including rs2 (conservative) AND MEM store forwarding. With the stall, the store-rs2 case never has a MEM/WB hit... actually it can: 
+```
+lw x1, 0(x0)
+addi x2, x0, 1
+sw x1, 0(x0)     # wait, this needs rs1 too
+```
+Hmm, `sw x1, 0(x0)` — rs1 = x0, rs2 = x1. I1 (load) is 2 instructions back → in WB when I3 in EX → EX forwarding from MEM/WB handles it. So MEM forwarding is a belt-and-braces. Fine.
+
+Hmm, actually a case: the producer is in MEM/WB when the store is in MEM? That means producer is 1 instruction before store: `lw x1; sw x1, ...` → load-use stall triggers (rs2 match). After stall, store in EX with load in MEM/WB → EX forward. OK.
+
+So MEM store forwarding never actually fires given we stall on rs2. That's fine — dead logic, harmless.
+
+Hmm, it does complicate. Let me decide: include it (spec mentions it), keep it simple.
+
+Actually, let me reconsider for simplicity and reduce risk of Coder errors: I'll include it. It's 4 extra ports on mem_stage.
+
+Hmm, but "面积/功耗优先" - meh. Include.
+
+Decision: include store-data forwarding in MEM stage.
+
+### mem_stage
+
+```
+module mem_stage (
+  input  logic clk,
+  input  logic rst_n,
+  input  logic halt,
+  input  logic rst_n_dmem,  // same as rst_n... 
+```
+Actually dmem output gating with rst_n: top-level can gate, or mem_stage takes rst_n and outputs dmem_valid already gated. mem_stage has rst_n. So mem_stage outputs `dmem_valid`, `dmem_we`, `dmem_addr`, `dmem_wdata`, `dmem_be` already gated by rst_n & ~halt.
+
+Ports:
+```
+module mem_stage (
+  input  logic clk,
+  input  logic rst_n,
+  input  logic halt,
+  // EX/MEM inputs from ex_stage
+  input  logic        ex_valid,
+  input  logic [31:0] ex_pc_plus4,
+  input  logic [31:0] ex_alu_result,
+  input  logic [31:0] ex_store_data,
+  input  logic [4:0]  ex_rs2_addr,
+  input  logic [4:0]  ex_rd,
+  input  logic        ex_reg_write,
+  input  logic        ex_mem_read,
+  input  logic        ex_mem_write,
+  input  logic [1:0]  ex_wb_sel,
+  input  logic [2:0]  ex_mem_funct3,
+  input  logic        ex_is_ecall,
+  // MEM/WB forwarding source (for store data)
+  input  logic        mem_wb_valid,
+  input  logic        mem_wb_reg_write,
+  input  logic [4:0]  mem_wb_rd,
+  input  logic [31:0] mem_wb_wdata,
+  // data memory interface
+  output logic        dmem_valid,
+  output logic        dmem_we,
+  output logic [31:0] dmem_addr,
+  output logic [31:0] dmem_wdata,
+  output logic [3:0]  dmem_be,
+  input  logic [31:0] dmem_rdata,
+  // MEM/WB outputs
+  output logic        mem_valid,
+  output logic [31:0] mem_wdata,
+  output logic [4:0]  mem_rd,
+  output logic        mem_reg_write,
+  output logic        mem_is_ecall
+);
+```
+
+`mem_wdata` = final writeback value selected in MEM.
+
+### wb_stage
+
+```
+module wb_stage (
+  input  logic clk,
+  input  logic rst_n,
+  input  logic halt,
+  // MEM/WB inputs
+  input  logic        mem_valid,
+  input  logic [31:0] mem_wdata,
+  input  logic [4:0]  mem_rd,
+  input  logic        mem_reg_write,
+  input  logic        mem_is_ecall,
+  // x10 for exit_code
+  input  logic [31:0] x10_value,
+  // registered MEM/WB (for forwarding / hazard)
+  output logic        mem_wb_valid,
+  output logic        mem_wb_reg_write,
+  output logic [4:0]  mem_wb_rd,
+  output logic [31:0] mem_wb_wdata,
+  // register file write port
+  output logic        wb_we,
+  output logic [4:0]  wb_rd,
+  output logic [31:0] wb_wdata,
+  // halt outputs
+  output logic        halted,
+  output logic [31:0] exit_code
+);
+```
+
+Note: `mem_wb_*` outputs are the registered versions (what's currently in WB). And `wb_we/wb_rd/wb_wdata` are the gated write port signals (wb_we = mem_wb_valid & mem_wb_reg_write & (rd!=0) & ~halted).
+
+Hmm, but wb_we depends on halted which is a register in the same module. Fine.
+
+Wait, but `halt` input = halted output → self-loop? The `halt` input is used to freeze registers. Since halted is output of the same module, top wires halted → halt input of all stages including wb_stage. That's a combinational feedback? No: halted is a register output, halt input used only in always_ff conditions. Fine.
+
+Actually to avoid confusion, wb_stage doesn't need `halt` input since halted is internal: `if (halted) hold`. But top-level `halt` for other stages = halted. OK, wb_stage doesn't take halt.
+
+Hmm, careful: wb_stage's mem_wb register update: `if (!rst_n) ... else if (halted) hold else mem_wb <= ...`. But halted is set at the same edge the ECALL commits... at that edge halted(old)=0 so mem_wb updates normally (gets invalid). Then halted=1. Fine.
+
+And `wb_we` gated by ~halted. But at the commit edge, mem_wb at cycle N = ECALL, wb_we=0 anyway.
+
+Now the register file write: `wb_we`, `wb_rd`, `wb_wdata` go to regfile.
+
+### regfile
+
+```
+module regfile (
+  input  logic clk,
+  input  logic rst_n,
+  input  logic        wb_we,
+  input  logic [4:0]  wb_rd,
+  input  logic [31:0] wb_wdata,
+  input  logic [4:0]  rs1_addr,
+  input  logic [4:0]  rs2_addr,
+  output logic [31:0] rs1_data,
+  output logic [31:0] rs2_data,
+  input  logic [4:0]  dbg_addr,
+  output logic [31:0] dbg_data,
+  output logic [31:0] x10_value
+);
+```
+
+Read with write-bypass: `rs1_data = (wb_we && wb_rd==rs1_addr) ? wb_wdata : regs[rs1_addr]`. x0 handled: regs[0] stays 0 (never write when rd==0 since wb_we already excludes rd==0; but also add guard).
+
+Hmm — but the write happens at posedge, and wb_we/wb_wdata are combinational outputs of wb_stage valid during the cycle. So bypass is correct for the same-cycle case.
+
+x10_value = regs[10] (no bypass needed since it's used for exit_code when ECALL in WB and no other write). Actually bypass would be wrong-ish; use raw regs[10].
+
+dbg_data = (dbg_addr == 0) ? 0 : regs[dbg_addr]. Since regs[0] is never written, just regs[dbg_addr]. But at reset we clear all regs. Ensure regs[0] always 0.
+
+### forwarding_unit
+
+```
+module forwarding_unit (
+  input  logic        ex_mem_valid,
+  input  logic        ex_mem_reg_write,
+  input  logic [4:0]  ex_mem_rd,
+  input  logic        ex_mem_mem_read,   // to avoid forwarding load data from EX/MEM
+  input  logic        mem_wb_valid,
+  input  logic        mem_wb_reg_write,
+  input  logic [4:0]  mem_wb_rd,
+  input  logic [4:0]  id_ex_rs1_addr,
+  input  logic [4:0]  id_ex_rs2_addr,
+  output logic [1:0]  fwd_a,
+  output logic [1:0]  fwd_b
+);
+```
+fwd encoding: 2'b00 = no forward (use ID/EX rs data), 2'b01 = EX/MEM alu result, 2'b10 = MEM/WB wdata.
+
+Rule: if ex_mem_valid && ex_mem_reg_write && ex_mem_rd != 0 && !ex_mem_mem_read && ex_mem_rd == rs1 → 01. Else if mem_wb_valid && mem_wb_reg_write && mem_wb_rd != 0 && mem_wb_rd == rs1 → 10. Else 00.
+
+Hmm: should EX/MEM forwarding be disallowed for loads? The load data isn't in alu_result. Right, if it's a load in EX/MEM, its rd matches → the value is in MEM/WB next cycle. The load-use stall guarantees the consumer isn't in EX. But could a consumer 2 instructions later still hit? Consumer in EX when load in EX/MEM = exactly the load-use case (stalled). So it can't happen. But including `!ex_mem_mem_read` is safer. Hmm, but if we include it, and the case somehow occurs, we'd fall back to MEM/WB which has wrong value (older). Actually it can't occur. I'll include `~ex_mem_mem_read` in the condition and note that correctness relies on load-use stall.
+
+Hmm, actually it's better to NOT include it: if a bug lets the case occur, forwarding the alu_result (which is the address for a load) would be wrong either way. Including the guard is more "correct". I'll include it.
+
+Hmm — cost: extra input port. Fine.
+
+Actually wait. There's a subtlety: what if ex_mem is a load and its rd matches, but mem_wb also matches with the right... no. Keep the guard.
+
+### hazard_unit
+
+```
+module hazard_unit (
+  input  logic clk,
+  input  logic rst_n,
+  input  logic halt,
+  // ID stage
+  input  logic        id_valid,
+  input  logic [4:0]  id_rs1_addr,
+  input  logic [4:0]  id_rs2_addr,
+  input  logic        id_uses_rs1,
+  input  logic        id_uses_rs2,
+  input  logic        id_is_ecall,
+  // EX/MEM (load in EX)
+  input  logic        ex_mem_valid,
+  input  logic        ex_mem_mem_read,
+  input  logic [4:0]  ex_mem_rd,
+  // EX redirect
+  input  logic        ex_redirect,
+  // outputs
+  output logic        stall_pc,       // freeze PC and IF/ID
+  output logic        flush_if_id,    // clear IF/ID valid
+  output logic        flush_id_ex,    // clear ID/EX valid
+  output logic        halt_pending
+);
+```
+
+Wait: ex_mem_valid/mem_read/rd here refer to the EX stage's load, which is the EX/MEM register content. In my naming, mem_stage's register holds `ex_mem_*` and mem_stage outputs them. But at the same time ex_stage's *outputs* to mem_stage are named `ex_valid`, `ex_mem_read`, `ex_rd`. Conflict! mem_stage outputs `ex_mem_valid` (registered) and ex_stage outputs `ex_mem_read` (combinational). Both would be the same net name in top → collision.
+
+Rename: ex_stage outputs to mem_stage: `ex_valid, ex_pc_plus4, ex_alu_result, ex_store_data, ex_rs2_addr, ex_rd, ex_reg_write, ex_load, ex_store, ex_wb_sel, ex_funct3, ex_is_ecall`. Then mem_stage registers into `ex_mem_*`.
+
+Hmm but `ex_load`/`ex_store` vs `ex_mem_read`/`ex_mem_write`. Let's use consistent naming:
+- ex_stage output: `ex_mem_read`, `ex_mem_write`? Then mem_stage's registered output would be `ex_mem_mem_read` — ugly.
+
+Let's define: stage combinational outputs use `<stage>_<field>`; the register in the next stage uses `<stage>_<next>_<field>`.
+
+ex_stage outputs: `ex_valid, ex_pc_plus4, ex_alu_result, ex_store_data, ex_rs2_addr, ex_rd, ex_reg_write, ex_mem_read, ex_mem_write, ex_wb_sel, ex_mem_funct3, ex_is_ecall`.
+mem_stage registers → `ex_mem_valid, ex_mem_pc_plus4, ex_mem_alu_result, ex_mem_store_data, ex_mem_rs2_addr, ex_mem_rd, ex_mem_reg_write, ex_mem_mem_read, ex_mem_mem_write, ex_mem_wb_sel, ex_mem_mem_funct3, ex_mem_is_ecall`.
+
+Still `ex_mem_read` (combinational from ex_stage) vs `ex_mem_mem_read` (register). Different names but confusing. Hmm. The forwarding_unit needs the EX/MEM registered `ex_mem_mem_read`... which is mem_stage's output. Actually for forwarding, we need to know if the instruction currently in EX/MEM is a load. That's `ex_mem_mem_read` (registered). OK. And the hazard unit also needs the same.
+
+But then the EX/MEM register's data isn't available until after the clock edge — correct, forwarding uses EX/MEM register content. ✓
+
+Hmm, so forwarding_unit inputs come from mem_stage outputs (ex_mem_*). And mem_stage outputs ex_mem_rd, ex_mem_reg_write, ex_mem_mem_read, ex_mem_valid, plus ex_mem_alu_result (for forwarding) — that's it. Fine.
+
+So mem_stage output ports include: `ex_mem_valid, ex_mem_alu_result, ex_mem_mem_read, ex_mem_reg_write, ex_mem_rd, ex_mem_rs2_addr`... plus mem_* outputs.
+
+Hmm, mem_stage exposing ex_mem_alu_result as an output is a bit odd but necessary for forwarding. Alternative: put the EX/MEM register in ex_stage (outputs directly). But spec suggests each stage registers its inputs. Let's keep and just expose.
+
+Alternatively: have ex_stage own the EX/MEM register! I.e., ex_stage registers its combinational result into EX/MEM at the end. Then mem_stage is purely combinational (computes dmem signals and load extension from ex_mem_*), and wb_stage owns MEM/WB register. Hmm, but then mem_stage is combinational which is fine, and the "MEM stage register" lives in ex_stage. That's a bit asymmetric but reduces port weirdness... Actually no, it creates the same naming issues.
+
+Let me just keep: ex_stage outputs combinational ex_* → mem_stage registers → mem_stage outputs ex_mem_* (registered) and mem_* (combinational for WB).
+
+But then forwarding_unit gets ex_mem_alu_result from mem_stage. And ex_stage needs it as input. So ex_stage has input `ex_mem_alu_result`. And also `mem_wb_wdata` input.
+
+OK that works. There's a top-level combinational path: mem_stage's ex_mem_alu_result (reg) → fwd → ex_stage → ex_alu_result → mem_stage's D input. No loop (reg breaks it). ✓
+
+Now also: `ex_mem_mem_read` for load-use detection: mem_stage output. ✓
+
+Wait, careful! Load-use detection needs the instruction in EX, which is the *combinational* output of ex_stage (ex_valid, ex_mem_read, ex_rd) — not the EX/MEM register. Hmm! Let's re-examine.
+
+Load-use hazard: "若 EX 级是有效 load ... 且 ID 级有效指令的 rs1/rs2 等于该 rd". The EX stage instruction is the ID/EX register content, which is ex_stage's internal register. Its combinational outputs are ex_valid, ex_mem_read, ex_rd — those describe the instruction currently in EX. ✓ So hazard_unit takes ex_valid, ex_mem_read, ex_rd from ex_stage's *combinational* outputs (which are the ID/EX register contents presented to mem_stage's input register).
+
+And forwarding uses EX/MEM (registered, i.e., mem_stage's outputs ex_mem_*). ✓
+
+Great, no conflict: hazard uses ex_* (combinational), forwarding uses ex_mem_* (registered).
+
+But `ex_mem_read` is used by hazard as "EX stage is a load". And `ex_mem_mem_read` is EX/MEM register's load flag used by forwarding. Both exist. Slightly confusing naming but let's rename for clarity:
+
+ex_stage combinational outputs: `ex_valid, ex_is_load, ex_is_store, ex_rd, ex_reg_write, ...`. Then mem_stage registers to `ex_mem_valid, ex_mem_is_load, ...`.
+
+Wait, but mem_stage also needs to drive dmem from... the EX/MEM register content (registered), which is mem_stage's own register. Yes.
+
+OK rename to avoid confusion:
+ex_stage outputs → `ex_valid, ex_pc_plus4, ex_alu_result, ex_store_data, ex_rs2_addr, ex_rd, ex_reg_write, ex_is_load, ex_is_store, ex_wb_sel, ex_funct3, ex_is_ecall`.
+
+mem_stage registers these into `ex_mem_*`, and outputs (for forwarding/hazard use):
+`ex_mem_valid, ex_mem_reg_write, ex_mem_rd, ex_mem_alu_result, ex_mem_is_load`.
+
+And hazard_unit uses ex_stage's `ex_valid, ex_is_load, ex_rd` (combinational, unregistered).
+
+Hmm, but forwarding needs `ex_mem_is_load` too. mem_stage outputs ex_mem_is_load. OK.
+
+Hmm, but wait: `ex_alu_result` (combinational from EX) vs `ex_mem_alu_result` (registered in mem_stage). ✓
+
+Note for JAL/JALR, wb_sel=2 → wdata=pc_plus4, so alu_result for JAL is don't care, but forwarding from EX/MEM uses ex_mem_alu_result which for a JAL is wrong; forwarding for JAL's rd... The consumer would get the alu result not pc+4. Bug!
+
+Hmm. Example: `jal x1, target` then `addi x2, x1, 0`? But the addi would be flushed by the redirect... Only if the branch is taken and the following instructions are flushed. JAL is always taken → next two instructions flushed → no consumer in EX. But a consumer 2+ later: `jal x1, L; ... ` at L. The consumer at L is fetched after redirect; when it's in EX, JAL is in MEM or WB. When JAL is in WB → forward from MEM/WB (wdata = pc+4 correct). When JAL is in MEM... let's see: redirect happens in EX; target instruction fetched next cycle. So target in IF at cycle T+1, ID at T+2, EX at T+3. JAL in EX at T, MEM at T+1, WB at T+2, commits at edge T+2→T+3. At cycle T+3, JAL is gone from the pipeline (WB register now holds... at cycle T+3, mem_wb holds whatever was in MEM at T+2 = JAL? no).
+
+Let's recount: at cycle T: JAL in EX. Cycle T+1: JAL in MEM. Cycle T+2: JAL in WB (mem_wb register). Cycle T+3: mem_wb holds the instruction that was in MEM at T+2 (invalid). So at T+3, JAL is no longer in the pipeline. Target instruction in EX at T+3. So the forward source would be... nothing. But x1 was written at edge T+2→T+3. And the regfile read at T+3 gives the new value? ID read at cycle T+3 → EX at T+4? Hmm, I said target in EX at T+3.
+
+Target: IF at T+1 (pc updated at edge T→T+1), IF/ID register captures at edge T+1→T+2. So target in ID at T+2. ID/EX captures at edge T+2→T+3 → target in EX at T+3. JAL wrote back at edge T+2→T+3 (JAL in WB at cycle T+2). So at cycle T+3, regfile has the new x1, and ID read happened at T+2 (old value) → ID/EX captured old value at edge T+2→T+3. So EX at T+3 has stale x1, and needs forwarding from... MEM/WB at T+3 holds invalid. Problem!
+
+Hmm, wait. Let's recheck: at cycle T+2, JAL is in WB; the WB write occurs at edge T+2→T+3. The ID stage at cycle T+2 reads regfile: bypass kicks in when wb_we && wb_rd==rs1 → the bypass uses wb_wdata combinationally. So ID read at cycle T+2 returns the new value. ✓ (Write-first bypass handles this.)
+
+Good, so the regfile bypass covers it.
+
+But what about the case where the consumer is 1 instruction after (in ID at T+1, EX at T+2)? That's flushed by the redirect (2 bubbles). So fine.
+
+And forwarding from EX/MEM for a JAL rd: possible if consumer in EX at T+1 — impossible since flushed.
+
+For AUIPC/LUI, wb_sel=0 → alu_result is the right value, forwarding OK.
+
+For loads, ex_mem_alu_result is the address — guarded by ex_mem_is_load.
+
+For JAL/JALR: wb_sel=2. Consumer can't be in EX at T+1. Could a consumer be in EX at T+2? EX at T+2 = instruction in ID at T+1 = flushed. So no. ✓ But to be extra safe, we could add `!ex_mem_wb_sel==2` guard... Let's not; but we could make ex_alu_result for JAL = pc+4 so that forwarding is correct anyway. Actually that's easy: in EX, if is_jal/is_jalr, set ex_alu_result = pc_plus4 (and wb_sel=2 then selects pc_plus4... redundant). Better: set wb_sel=0 (alu) for JAL/JALR and make alu_result = pc+4! Then no special wb_sel needed.
+
+Hmm, but the ALU op would need to produce pc+4. Use alu_a_sel = pc+4? Let's add: for JAL/JALR, a_sel selects pc_plus4, b_sel... Let's define alu_a_sel 2 bits: 0=rs1, 1=pc, 2=pc_plus4. b_sel: 0=rs2, 1=imm. For JAL: a=pc_plus4, b=zero? Need imm=0. Hmm.
+
+Cleaner: keep wb_sel=2 for jumps and make wdata = pc_plus4 in WB. Then for forwarding, ex_mem_alu_result would be the target address (wrong). But as analyzed, it can't be used. To be robust, let ex_stage output `ex_alu_result` = pc_plus4 when is_jal/is_jalr (and store the target separately for redirect). Then ex_mem_alu_result = pc+4, and both wb_sel=2 (redundant) and forwarding work.
+
+Hmm, but is_store uses alu_result as address; jumps aren't stores. OK.
+
+So: in ex_stage, final `ex_alu_result` = (is_jal || is_jalr) ? id_ex_pc_plus4 : alu_out. And wb_sel for JAL/JALR = 2'b10 → selects... if alu_result already = pc+4, then wb_sel=0 (alu) works. Let me just set wb_sel=0 for JAL/JALR and rely on alu_result. Then wb_sel only needs 2 values: 0=alu, 1=mem. Simpler! 1 bit: `id_wb_sel`: 0 = alu result, 1 = mem data.
+
+Nice, that reduces ports. But then the "WB 写回数据选择：AUIPC = pc + imm" — handled in ALU with a_sel=pc. ✓
+
+So wb_sel becomes 1 bit: `id_mem_to_reg` (0 = alu_result, 1 = load data).
+
+Good, simpler.
+
+Let's finalize the control signal list:
+
+id_stage outputs (registered into ID/EX by ex_stage):
+- id_valid (1)
+- id_pc (32)
+- id_pc_plus4 (32)
+- id_rs1_data (32)
+- id_rs2_data (32)
+- id_rs1_addr (5)
+- id_rs2_addr (5)
+- id_imm (32)
+- id_rd (5)
+- id_alu_op (4)
+- id_alu_a_sel (1)  // 0=rs1, 1=pc
+- id_alu_b_sel (1)  // 0=rs2, 1=imm
+- id_reg_write (1)
+- id_is_load (1)
+- id_is_store (1)
+- id_mem_to_reg (1)
+- id_br_op (3)
+- id_is_branch (1)
+- id_is_jal (1)
+- id_is_jalr (1)
+- id_is_ecall (1)
+- id_funct3 (3)
+
+That's 22 signals. Plus rs1_addr/rs2_addr for the regfile read (also output). Note id_rs1_addr is used both for the regfile read address and as the registered value passed to EX. Actually id_rs1_addr = instruction's rs1 field, used for regfile read AND passed to ID/EX. Same signal. ✓
+
+Also id_uses_rs1, id_uses_rs2, id_ecall_detected for hazard unit.
+
+OK, let's now count ports carefully and write them out.
+
+Now the ALU op encoding (4 bits):
+- 4'd0: ADD
+- 4'd1: SUB
+- 4'd2: SLL
+- 4'd3: SLT
+- 4'd4: SLTU
+- 4'd5: XOR
+- 4'd6: SRL
+- 4'd7: SRA
+- 4'd8: OR
+- 4'd9: AND
+- 4'd10: PASS_B (LUI: result = imm)
+
+br_op (3 bits): 0=BEQ,1=BNE,2=BLT,3=BGE,4=BLTU,5=BGEU.
+
+Now: for JAL/JALR the EX computes target = pc + imm (JAL) or (rs1_fwd + imm) & ~1 (JALR). Use br_op don't care.
+
+Redirect = (id_is_branch & cond) | id_is_jal | id_is_jalr, all gated by id_ex_valid.
+redirect_pc = is_jalr ? ((fwd_rs1 + imm) & ~32'h1) : (id_ex_pc + imm).
+
+Now, careful: for the redirect path we need fwd_a applied to rs1. ✓
+
+Now let's write everything out. Also need `halt` for stages.
+
+Which stages need `halt` input to freeze? if_stage (PC), id_stage (IF/ID), ex_stage (ID/EX), mem_stage (EX/MEM + dmem gating), wb_stage (internal). Top passes `halted`.
+
+Actually, simpler: since after halted everything downstream is invalid, freezing isn't strictly needed except: dmem_valid must be 0 (gate with ~halted & rst_n) and wb_we must be 0 (gate with ~halted). And PC/imem_addr must hold. So if_stage needs halt (or freeze via stall). Let's give halt to if_stage and id_stage; ex_stage/mem_stage/wb_stage just gate outputs.
+
+Hmm, mem_stage: if not frozen, EX/MEM shifts in invalid stuff, fine. dmem_valid gated. So mem_stage doesn't need halt, just the gate. But it needs to know halted → give it `halt` input for gating.
+
+ex_stage: freeze not needed. But its outputs shift; harmless since valid=0 propagation. Hmm, but ID/EX register would load garbage — with valid=0 from ID. Fine.
+
+id_stage: if not frozen, IF/ID loads new instruction with if_valid... if_stage frozen means if_pc frozen → same instruction refetched → IF/ID would load it with valid=1! Then ID would decode it and possibly issue. Bad. So id_stage must be frozen or flushed. Give `halt` to id_stage: freeze IF/ID entirely.
+
+Similarly ex_stage would receive valid=0 (since id_stage outputs id_valid=0 when... hmm, id_valid = if_id_valid which is frozen; if we freeze id_stage's register the valid stays whatever it was). Ugh — after halt, IF/ID holds the last valid=0 (since halt_pending flushed it) → id_valid=0 → ID/EX gets valid=0. Fine.
+
+Let me just add `halt` to all 5 stages for holding. Simplest and safest: each stage's always_ff: `if (!rst_n) ... else if (halt) begin /*hold*/ end else ...`. Except wb_stage uses its own halted.
+
+Hmm, but wb_stage's halted: `if (!rst_n) halted<=0; else if (mem_wb_valid && mem_wb_is_ecall) begin halted<=1; exit_code<=x10_value; end`. And mem_wb register: `else if (halted) hold else ...`.
+
+Careful about priority: at the commit edge, halted(old)=0, so mem_wb updates. Then next edges, halted=1 → hold. ✓
+
+And exit_code: `if (!rst_n) exit_code<=0; else if (!halted && mem_wb_valid && mem_wb_is_ecall) exit_code <= x10_value;` — keep stable when halted. ✓
+
+And spec: "halted=0 时 exit_code=0". Since exit_code only changes at the commit edge and that's the same edge halted becomes 1. Actually at the commit edge, exit_code <= x10 and halted <= 1 simultaneously. So when halted=0, exit_code=0. ✓
+
+Now, halt_pending in hazard_unit:
+```
+always_ff @(posedge clk) begin
+  if (!rst_n) halt_pending <= 0;
+  else if (halt) halt_pending <= halt_pending;
+  else if (ex_redirect) halt_pending <= 0;  // shouldn't matter
+  else if (id_valid && id_is_ecall) halt_pending <= 1;
+end
+```
+Hmm, if a redirect occurs in the same cycle as the ECALL in ID, the ECALL gets flushed → don't set pending. Spec: "若更老的控制转移冲刷掉 ID 级的 ECALL，则该 ECALL 不产生停机". So `halt_pending <= id_valid && id_is_ecall && !ex_redirect`. ✓
+
+And once set, stays set until reset. ✓
+
+Outputs:
+- `flush_if_id` = ex_redirect | halt_pending | (id_valid && id_is_ecall && !ex_redirect)? 
+
+Hmm. When ECALL is in ID at cycle T, at edge T→T+1 we want IF/ID valid=0. So flush_if_id must be asserted during cycle T. So flush_if_id = ex_redirect | id_ecall_kill | halt_pending where id_ecall_kill = id_valid & id_is_ecall & ~ex_redirect.
+
+Actually once halt_pending is set (from T+1 onward), flush_if_id = halt_pending covers it.
+
+So: `flush_if_id = ex_redirect | halt_pending | ecall_now` where `ecall_now = id_valid & id_is_ecall & ~ex_redirect`.
+
+Since halt_pending registers at T→T+1, at cycle T halt_pending=0 but ecall_now=1 → flush. At T+1 onward, halt_pending=1 → flush. ✓
+
+- `flush_id_ex` = ex_redirect | load_use_stall. (Not for ECALL.)
+  Wait: at cycle T, ECALL in ID → ID/EX must get ECALL. flush_id_ex = 0 (assuming no redirect/stall). ✓
+
+- `stall_pc` = load_use_stall | halt_pending. And also ecall_now? At cycle T (ECALL in ID), we want PC frozen at T→T+1 because... spec: "PC 保持". PC at cycle T is already ecall_pc+4. Freezing from T→T+1 keeps it at ecall_pc+4. If not frozen, PC advances to ecall_pc+8 — but IF/ID is flushed anyway and PC frozen afterward. Spec says PC holds. So include ecall_now in stall_pc: `stall_pc = load_use_stall | halt_pending | ecall_now`.
+
+Hmm, but "PC 冻结在取到 ECALL 后的当前值" — that's ecall_pc+4 which is PC during cycle T. So freeze at T→T+1. Yes, include ecall_now.
+
+Now, load_use_stall only when !ex_redirect (redirect priority). And also should not stall when halt_pending. Fine.
+
+load_use_stall = id_valid & ex_valid & ex_is_load & (ex_rd != 0) & ((id_uses_rs1 & (id_rs1_addr==ex_rd)) | (id_uses_rs2 & (id_rs2_addr==ex_rd))) & ~ex_redirect.
+
+Hmm, `ex_valid & ex_is_load & ex_rd != 0`. ✓
+
+Now id_stage: `stall` input = load_use_stall (hold IF/ID), `flush` = flush_if_id.
+
+Careful: during halt_pending, stall_pc=1 and flush_if_id=1. id_stage gets flush=1 → IF/ID valid <= 0. And data? hold or update, doesn't matter.
+
+But if id_stage has both `halt` (freeze) and flush... After halted, freeze all. OK.
+
+ex_stage: `flush` input = flush_id_ex (clear ID/EX valid).
+
+Now let's also double check: during load-use stall, PC frozen, IF/ID holds, ID/EX valid cleared. ✓ Next cycle, load in MEM/WB, no stall, IF/ID advances. ✓
+
+Now the redirect: ex_redirect → if_stage pc <= redirect_pc, flush_if_id=1, flush_id_ex=1. ✓
+
+Priority in if_stage PC: reset > halt > redirect > stall > pc+4. ✓
+
+Now `imem_addr` = pc. During reset (rst_n=0), pc is 0 (after the first reset edge). Before that pc is X. Spec says don't care.
+
+Now halted gating: dmem_valid = ex_mem_valid & (mem_read|mem_write) & rst_n & ~halt. ✓
+
+Now let's write the module list with full ports.
+
+Also, one more: `id_is_ecall` — should be instruction == 32'h0000_0073. And also valid.
+
+Now, the top module must connect everything. Let's list top-level instantiations.
+
+Let me write out the JSON now.
+
+Module list order: rv32i5, if_stage, id_stage, ex_stage, mem_stage, wb_stage, hazard_unit, forwarding_unit, regfile.
+
+Let me write interfaces carefully.
+
+**rv32i5**:
+ports as spec.
+
+**regfile.sv**:
+```
+input logic clk, rst_n
+input logic wb_we
+input logic [4:0] wb_rd
+input logic [31:0] wb_wdata
+input logic [4:0] rs1_addr
+output logic [31:0] rs1_data
+input logic [4:0] rs2_addr
+output logic [31:0] rs2_data
+input logic [4:0] dbg_addr
+output logic [31:0] dbg_data
+output logic [31:0] x10_value
+```
+
+**if_stage.sv**:
+```
+clk, rst_n
+halt
+stall
+redirect
+redirect_pc[31:0]
+imem_addr[31:0] out
+imem_rdata[31:0] in
+if_valid out
+if_pc[31:0] out
+if_pc_plus4[31:0] out
+if_instr[31:0] out
+```
+
+**id_stage.sv**:
+inputs: clk, rst_n, halt, flush, stall,
+ if_valid, if_pc[31:0], if_pc_plus4[31:0], if_instr[31:0],
+ rs1_data[31:0], rs2_data[31:0]  (from regfile)
+outputs:
+ rs1_addr[4:0], rs2_addr[4:0]  (to regfile)
+ id_valid, id_pc[31:0], id_pc_plus4[31:0], id_rs1_data[31:0], id_rs2_data[31:0],
+ id_rs1_addr[4:0], id_rs2_addr[4:0], id_imm[31:0], id_rd[4:0],
+ id_alu_op[3:0], id_alu_a_sel, id_alu_b_sel,
+ id_reg_write, id_is_load, id_is_store, id_mem_to_reg,
+ id_br_op[2:0], id_is_branch, id_is_jal, id_is_jalr, id_is_ecall,
+ id_funct3[2:0]
+
+Wait — id_rs1_addr is the same as rs1_addr (the regfile read address). Both are the instruction's rs1 field, one registered (ID/EX) and one combinational. Hmm, they're the same combinational value from if_instr. So id_rs1_addr (output to ex_stage) = rs1_addr. Duplicate ports. Keep both for clarity — the Coder just assigns both from the decode.
+
+Hmm, but the ID/EX register is in ex_stage, so id_rs1_addr must be a separate output port. Yes, keep both. It's fine.
+
+For hazard_unit: id_valid, id_rs1_addr, id_rs2_addr, id_uses_rs1, id_uses_rs2, id_is_ecall. Add outputs id_uses_rs1, id_uses_rs2.
+
+**ex_stage.sv**:
+inputs: clk, rst_n, halt, flush,
+ id_valid, id_pc[31:0], id_pc_plus4[31:0], id_rs1_data[31:0], id_rs2_data[31:0],
+ id_rs1_addr[4:0], id_rs2_addr[4:0], id_imm[31:0], id_rd[4:0],
+ id_alu_op[3:0], id_alu_a_sel, id_alu_b_sel,
+ id_reg_write, id_is_load, id_is_store, id_mem_to_reg,
+ id_br_op[2:0], id_is_branch, id_is_jal, id_is_jalr, id_is_ecall, id_funct3[2:0],
+ fwd_a[1:0], fwd_b[1:0],
+ ex_mem_alu_result[31:0]  (forward from EX/MEM register)
+ mem_wb_wdata[31:0]
+ id_ex_rs1_addr[4:0] out (to forwarding_unit)
+ id_ex_rs2_addr[4:0] out
+ ex_redirect out
+ ex_redirect_pc[31:0] out
+ ex_valid out, ex_pc_plus4[31:0] out, ex_alu_result[31:0] out, ex_store_data[31:0] out,
+ ex_rs2_addr[4:0] out, ex_rd[4:0] out, ex_reg_write out, ex_is_load out, ex_is_store out,
+ ex_mem_to_reg out, ex_funct3[2:0] out, ex_is_ecall out
+
+Wait, I earlier said no store-data forwarding in MEM... I decided to include it. So ex_rs2_addr output → mem_stage.
+
+Hmm, but naming: ex_rs2_addr (combinational from ID/EX register) vs id_ex_rs2_addr. Both are the same value! id_ex_rs2_addr is what forwarding_unit needs, ex_rs2_addr is what mem_stage needs. They're identical signals. Duplicating port names is ugly but fine. Actually let me just use ONE output `id_ex_rs2_addr` and route it to both forwarding_unit and mem_stage. But mem_stage port name would then be `id_ex_rs2_addr` — confusing since it's in EX stage.
+
+Hmm. Simpler: drop MEM store-data forwarding (since load-use stall covers it, and it's explicitly allowed by spec). Then no ex_rs2_addr needed for MEM.
+
+Decision: drop store-data forwarding. Rely on load-use stall including rs2 + EX/MEM and MEM/WB forwarding. This is explicitly permitted ("若实现仍按上条暂停，同样正确").
+
+Good — removes ex_rs2_addr, mem_wb_* inputs to mem_stage. Simpler.
+
+But then spec §7.2 "store data 在 MEM 级前递" is not implemented. Risk assessment: the grader is the external TB, functional. It should pass. And §7.3 explicitly allows. I'll note it in `notes`.
+
+Hmm, but a strict reviewer might check. The task says the TB compiles and verifies. I'll go with the simpler, still-correct design and note it.
+
+Actually... let me reconsider once more. Including it costs: ex_stage output ex_rs2_addr[4:0], mem_stage inputs ex_rs2_addr[4:0] (registered to ex_mem_rs2_addr), mem_wb_valid/reg_write/rd/wdata. That's 5 extra ports on mem_stage + 1 on ex_stage. And mem_wb outputs from wb_stage already exist. Not much. But it's dead logic given the stall.
+
+I'll drop it. Cleaner.
+
+So ex_stage outputs: ex_valid, ex_pc_plus4, ex_alu_result, ex_store_data, ex_rd, ex_reg_write, ex_is_load, ex_is_store, ex_mem_to_reg, ex_funct3, ex_is_ecall, ex_redirect, ex_redirect_pc, id_ex_rs1_addr, id_ex_rs2_addr.
+
+Hmm wait, ex_store_data must be the forwarded rs2. ✓ computed in EX.
+
+**mem_stage.sv**:
+inputs: clk, rst_n, halt,
+ ex_valid, ex_pc_plus4[31:0], ex_alu_result[31:0], ex_store_data[31:0], ex_rd[4:0],
+ ex_reg_write, ex_is_load, ex_is_store, ex_mem_to_reg, ex_funct3[2:0], ex_is_ecall,
+ dmem_rdata[31:0]
+outputs:
+ dmem_valid, dmem_we, dmem_addr[31:0], dmem_wdata[31:0], dmem_be[3:0],
+ ex_mem_valid, ex_mem_alu_result[31:0], ex_mem_reg_write, ex_mem_rd[4:0], ex_mem_is_load,
+ mem_valid, mem_wdata[31:0], mem_rd[4:0], mem_reg_write, mem_is_ecall
+
+Note ex_mem_alu_result is exposed for forwarding. ex_mem_is_load for forwarding guard. ex_mem_valid, ex_mem_reg_write, ex_mem_rd.
+
+**wb_stage.sv**:
+inputs: clk, rst_n, mem_valid, mem_wdata[31:0], mem_rd[4:0], mem_reg_write, mem_is_ecall, x10_value[31:0]
+outputs: mem_wb_valid, mem_wb_reg_write, mem_wb_rd[4:0], mem_wb_wdata[31:0], wb_we, wb_rd[4:0], wb_wdata[31:0], halted, exit_code[31:0]
+
+**forwarding_unit.sv**:
+inputs: ex_mem_valid, ex_mem_reg_write, ex_mem_rd[4:0], ex_mem_is_load, mem_wb_valid, mem_wb_reg_write, mem_wb_rd[4:0], id_ex_rs1_addr[4:0], id_ex_rs2_addr[4:0]
+outputs: fwd_a[1:0], fwd_b[1:0]
+
+**hazard_unit.sv**:
+inputs: clk, rst_n, halt, id_valid, id_rs1_addr[4:0], id_rs2_addr[4:0], id_uses_rs1, id_uses_rs2, id_is_ecall, ex_valid, ex_is_load, ex_rd[4:0], ex_redirect
+outputs: stall_pc, flush_if_id, flush_id_ex, halt_pending
+
+Hmm, hazard_unit needs `halt`? Once halted, halt_pending irrelevant. But flush_if_id would keep being 1 which is fine (id_stage frozen by halt anyway). Let's include halt for cleanliness — actually it needs rst_n for halt_pending reset. Include clk, rst_n, halt.
+
+Now, does ex_stage need `ex_redirect` gated by halt? ex_valid would be... after halt, ID/EX holds with valid=0 (since id_stage frozen → id_valid=0). Hmm, id_stage frozen holds IF/ID which has valid=0 (halt_pending flushed it). So id_valid=0 → ex_redirect=0. ✓ Good.
+
+Now, `x10_value` from regfile → wb_stage.
+
+Now dbg: top connects dbg_reg_addr → regfile dbg_addr; regfile dbg_data → dbg_reg_data.
+
+Now let's double-check the reset of the pipeline. rst_n sync. Each stage: `if (!rst_n) valid <= 0;`.
+
+Also mem_stage's dmem_valid gated by rst_n combinationally. ✓
+
+Now one more check on ID reads and the regfile bypass with `halted`: wb_we is gated by ~halted. ✓
+
+Now let's check the halt_pending → ECALL flows to EX while halt_pending. At cycle T+1: ECALL in ID/EX (ex_valid=1, ex_is_ecall=1). flush_id_ex at cycle T was 0, so ID/EX loaded ECALL. But wait — is flush_id_ex=0 at cycle T? flush_id_ex = ex_redirect | load_use_stall. If the ECALL's rs1/rs2 cause a load-use... ECALL has no rs1/rs2 (fields are 0 for the exact encoding 0x73 → inst[19:15]=0, inst[24:20]=0). rs1_addr=0, rs2_addr=0. And id_uses_rs1/id_uses_rs2 for ECALL = 0. So no stall. ✓
+
+Also, could ex_redirect be asserted at cycle T? Only if a branch/jump is in EX. If so, the ECALL gets flushed and no halt pending. ✓
+
+Now at cycle T+1, ECALL in EX with is_branch=0, is_jal=0, is_jalr=0 → no redirect. ✓ Then MEM, then WB.
+
+At cycle T+1 also: id_valid=0 (IF/ID flushed). So flush_id_ex... fine.
+
+At cycle T+2: ECALL in MEM (ex_mem_valid=1). dmem_valid = ex_mem_valid & (is_load|is_store) = 0 since ECALL has is_load=is_store=0. ✓
+
+At cycle T+3: ECALL in WB → mem_wb_valid & mem_wb_is_ecall → halted=1, exit_code <= x10. ✓
+
+Now let's verify: does mem_wb_is_ecall get properly propagated? ex_is_ecall → ex_mem_is_ecall → mem_is_ecall → mem_wb_is_ecall. ✓
+
+Now let's double check `ex_alu_result` for AUIPC: a_sel=pc, b_sel=imm, op=ADD → pc+imm. ✓ LUI: op=PASS_B → imm. Need b_sel=imm. ✓
+
+Now, one thing: id_alu_a_sel for AUIPC selects `id_pc`. And for JAL/JALR we override in EX with pc_plus4.
+
+Now let's also handle: is_load/is_store use alu (ADD) for address: a_sel=rs1, b_sel=imm, op=ADD. ✓
+
+Branch: EX computes comparison from fwd'd rs1/rs2 and br_op. ✓
+
+Now let's write out the JSON.
+
+Also need `imem_addr` low 2 bits = 0: PC always 4-aligned. Fine.
+
+Let me write the descriptions concisely but the interfaces fully.
+
+One more consideration: `id_uses_rs1`/`id_uses_rs2` — for which instructions? R-type, I-type ALU, shifts, load, store, branch, JALR → rs1. R-type, store, branch → rs2. LUI, AUIPC, JAL, ECALL → none.
+
+OK. Also `id_rd` for stores/branches should be 0 or don't care (reg_write=0).
+
+Now write JSON.
+
+For the notes, mention: pipeline registers inside stages, control encodings, halt handling, and that store-rs2 uses load-use stall rather than MEM store-data forwarding.
+
+Let me be careful the JSON is valid — no trailing commas.
+
+I'll write interface strings as semicolon-separated lists.
+
+Let me now produce it.
+
+For rv32i5 module interfaces, list spec ports.
+
+Write out:
+
+"clk: input logic; rst_n: input logic; imem_addr: output logic [31:0]; imem_rdata: input logic [31:0]; dmem_valid: output logic; dmem_we: output logic; dmem_addr: output logic [31:0]; dmem_wdata: output logic [31:0]; dmem_be: output logic [3:0]; dmem_rdata: input logic [31:0]; dbg_reg_addr: input logic [4:0]; dbg_reg_data: output logic [31:0]; halted: output logic; exit_code: output logic [31:0]"
+
+Good format: "name: direction type [width]".
+
+Let's produce final JSON.

@@ -1,0 +1,100 @@
+We need answer only RTL source module. Need design. Need understand interface/handshakes and requirement. Need implement seq1011 with in_valid/in_ready, out_valid/out_ready, match. Detect overlapping sequence 1011. If just received bit makes last four bits =1011, corresponding match=1. Output through handshake. Need consider pipeline? Need infer. Input handshake accept bit when in_valid && in_ready. Output match likely for accepted bit, with out_valid match valid. Need buffer in-flight outputs to not drop; reset clears detection history and in-flight output. Need decide ready behavior. We need robust implementation.
+
+We need output source only. Need design module. Requirements:
+- in_ready output. Input acceptance only when in_valid && in_ready at clk edge.
+- Output handshake out_valid && out_ready transfer result; out_valid=1 indicates match valid.
+- Function: detect overlapping 1011; if newly received bit makes most recent four received bits 1011, corresponding match=1 else 0.
+- Reset low clears history and pending output, out_valid=0.
+
+We can design streaming with one output per accepted input. But output can backpressure; need store results. Since input history independent of output buffering. Need at least one pending output? If out_valid holds current result and in_ready maybe can accept next input only if can store result? We can allow input acceptance simultaneous with output transfer and maybe only one output slot. But if output blocked and next accepted input produces result, need buffer. Need decide design that never loses match. Could stall input when pending output not transferred, except if accepting new bit can also output? We need ensure all accepted bits produce output. If out_valid=1 and not out_ready, cannot accept new input if new input result needs storing; but could accept if result will be? Any accepted bit corresponds to a match output (0/1). Actually out_valid=1 indicates match valid; Does every accepted input produce an output (with match 0 or 1), or only matches? Wording: "若刚接收的 bit 使...该 bit 对应的 match 为 1，否则为 0." Output handshake transmits result; out_valid=1 indicates match valid. So likely every accepted input produces a result valid, match 0/1. Need output for each bit. Thus if output backpressure, need buffer or stall input. We can implement in_ready = !out_valid || out_ready, i.e., only accept new input when pending output can be consumed this cycle (or no pending). This gives throughput 1 when out_ready high, stalls when blocked. At clock edge, if in_valid && in_ready accept bit and calculate match for that bit. Need if simultaneous output transfer and accept, set out_valid to new result. If no accept but output transfer, clear out_valid. If both valid ready? We'll derive.
+
+Could make combinational next state for sequence from current state and in_bit when accepted. Need output match for accepted bit. out_valid represents pending result from prior accepted input not yet transferred. At edge, if accept:
+- compute match_new using current state and in_bit; update state to next.
+- assign match reg <= match_new; out_valid <= 1 (new pending result) regardless if old transferred? Wait if old output transferred simultaneously, slot becomes new. If out_ready=0, in_ready false so no accept. If out_valid=0, in_ready true. If out_valid=1 and out_ready=1, both transfer old and accept new: at edge, output handshake samples old match from before edge, then match <= new, out_valid<=1. Good.
+If accept and no pending (out_valid=0), out_valid<=1. If no accept and out_valid & out_ready, out_valid<=0. Need if accept and out_valid=1 but out_ready? in_ready prevents unless out_ready=1. Good. If no accept and no transfer, hold.
+
+Reset: out_valid=0, state=0, match maybe 0.
+
+Sequence detection overlapping. Use 4-bit shift register of last bits? Let history bits accepted. For match if {history[2:0], in_bit} == 4'b1011? Need maintain last three bits. Let state = last 3 received bits. On accept, next_state = {state[1:0], in_bit}; match = (state == 3'b101) && in_bit == 1? Wait last four bits are previous last 3 plus new bit. Previous state bits order need define. If state stores last three bits in order oldest? Say state[2:0] = last 3 bits received, with state[2]=third last? Let's test. We want previous 3 bits = 101 and new=1 for sequence 1011. If previous last 3 bits are 101, state must equal 3'b101 independent of ordering as string? Need be precise.
+
+Let state as shift register: state[2:0] where state[0] is most recent previous bit? Or concatenation. Simpler use last3 <= {last3[1:0], in_bit}; if last3 holds last three bits with [2] oldest, [0] newest? Actually {last3[1:0], in_bit}: new[2]=old[1], new[1]=old[0], new[0]=in_bit. Then [0] newest, [2] third oldest. For sequence bits received b1 b2 b3 b4, after b3 last3 = {b1,b2,b3}? Let's simulate initial 000; after b1: {00,b1} = 00b1. [0]=b1 newest. after b2: {0,b1,b2} = 0 b1 b2? Bits [2]=0, [1]=b1, [0]=b2. after b3: {b1,b2,b3}? [2]=old[1]=b1, [1]=old[0]=b2, [0]=b3. Thus [2:0] = b1 b2 b3 (oldest to newest). For last four b1 b2 b3 b4 = 1011, previous last3 b1b2b3=101, and in_bit=1. state == 3'b101? [2]=b1=1, [1]=b2=0, [0]=b3=1 => 3'b101 yes. So match = (state == 3'b101 && in_bit). Alternatively for first bits fewer than four, state includes zeros and cannot match except if starting zeros? Input bits 1011 from initial zeros: previous state before final 1: after 101 state=101, match. Good. What about sequence 01011? Last4 1011 match at final, previous state 101 yes. Good.
+
+But if initial reset state=000, could false match for input sequence 0011? For new bit 1 and state==101 only after actual bits 101. fine. Could false detect 1011 at bits early? Need four bits; state after 2 bits maybe if bits 10 then state=010; after third 1 => state=101; fourth 1 match. OK.
+
+Potential alternative use counter? Fine.
+
+Need decide in_ready combinational. If out_valid=0, in_ready=1. If out_valid=1, in_ready=out_ready. This allows accept only if old output consumed. But what if out_valid=1 and out_ready=1, in_ready=1. At edge, accept new input; old output handshake. Good. If no new input in_valid=0, in_ready maybe 1 if out_ready? Doesn't matter. out_valid clears if out_ready. Need compute out_valid next:
+always_ff:
+ if !rst_n: state<=0; out_valid<=0; match<=0;
+ else begin
+   if (out_valid && out_ready) out_valid <= 0; // default transfer clears
+   if (in_valid && in_ready) begin
+      state <= next_state;
+      match <= match_new;
+      out_valid <= 1'b1;
+   end
+ end
+But consider out_valid=1, out_ready=1, accept: first clear then set 1 -> good. out_valid=0, no accept -> hold 0. out_valid=0 accept -> 1. out_valid=1 no out_ready -> in_ready 0 accept false; out_valid remains1. Good. out_valid=1 out_ready=1 no accept -> clear. Good.
+
+Need match output register valid even if no out_valid. fine.
+
+Potential issue: if in_valid && in_ready and out_valid && out_ready, the output handshake for old match and input handshake occurs same edge. The newly computed match sets match reg after edge. The output will be valid with new match. The old match is consumed. Great.
+
+Could implement in_ready = ~out_valid | out_ready; equivalently !out_valid || out_ready. Need ensure in_ready as output logic, not reg.
+
+Need use next state combinational only when accepted. Since state only updates when accepted. next_state = {state[1:0], in_bit}? With our shift orientation state = last3 oldest to newest. If state[2]=oldest, [0]=newest, then next state = {state[1:0], in_bit}? Let's verify: {state[1:0], in_bit} has [2]=state[1] (second newest previous), [1]=state[0] (newest previous), [0]=in_bit. That drops oldest state[2], new last three are old [1], old [0], new. That is correct. Earlier I wrote last3 <= {last3[1:0], in_bit}; same. Good. But state orientation from simulation: after b1 state=00b1. After b2 {0,b1,b2} = 0 b1 b2. Wait state[1:0] old = 0? Let's recalc: after b1 state [2:0]=0 0 b1. state[1:0]=0 b1. next={0 b1,b2}=0 b1 b2. State bits [2]=0,[1]=b1,[0]=b2, which is last three [b1,b2]? If only 2 bits, zero padded. after b3 next={state[1:0]=b1 b2? Wait after b2 state = 0 b1 b2, state[1:0]=b1 b2, plus b3 => b1 b2 b3. state[2]=b1,[1]=b2,[0]=b3. Correct. So next_state = {state[1:0], in_bit}. match_new = (state == 3'b101) && in_bit. Need ensure state orientation 3'b101: [2]=1,[1]=0,[0]=1 = bits b1,b2,b3 = 1,0,1. yes.
+
+Could use full 4-bit shift register and match = (shift_reg[3:0] == 4'b1011) after shifting. But pending output issue. State approach fine.
+
+Need output only RTL. No markdown. Ensure SystemVerilog syntax. module seq1011 (...); logic [2:0] state; logic [2:0] next_state; logic match_next; assign in_ready = ~out_valid | out_ready; always_comb begin next_state = state; match_next=1'b0; if(in_valid && in_ready) begin next_state = {state[1:0], in_bit}; match_next = (state == 3'b101) && in_bit; end end But match_next doesn't need in_ready? It only used if accepted. Could define always_comb with if(in_valid && in_ready). Need avoid latch? Assign defaults.
+
+always_ff @(posedge clk or negedge rst_n) begin
+ if(!rst_n) begin state<=3'b000; match<=1'b0; out_valid<=1'b0; end else begin
+   if (out_valid && out_ready) out_valid <= 1'b0;
+   else if (!out_valid && in_valid && in_ready) out_valid <= 1'b1; // Wait need if out_valid & out_ready & accept: should set1. The above clear then subsequent if? Need structure.
+ end
+end
+
+Better:
+always_ff:
+ if reset...
+ else begin
+   if (in_valid && in_ready) begin
+      state <= next_state;
+      match <= match_next;
+      out_valid <= 1'b1;
+   end else if (out_valid && out_ready) begin
+      out_valid <= 1'b0;
+   end
+ end
+
+Check simultaneous out_valid && out_ready and accept: condition accept true; out_valid <=1 (retains new). Good. State update. If accept false and transfer true: clear. If accept and no transfer impossible when pending due in_ready? If no pending, out_valid<=1. Good. If accept and out_valid=1 and out_ready=1, old consumed; match reg overwritten with new after edge. Is that okay for old output? The old match was present before edge and out_ready samples at edge. Yes.
+
+What if in_valid && in_ready and out_valid=0; out_valid<=1. What if out_valid=1 and out_ready=0 but in_ready=0 so accept false. hold. Good.
+
+Potential issue if reset while output ready, clear. good.
+
+Input valid may be high while in_ready false; ignored. State holds. out_valid pending. Once out_ready high, in_ready high. If in_valid high, accept new and old transfers simultaneously. If in_valid low, old transfers and out_valid clears. Then in_ready high next cycle.
+
+Could output match for accepted bit in same cycle? This design outputs one cycle later. Requirement doesn't state latency. Fine. "在途输出" refers pending outputs. Good.
+
+Potential alternative: Could make combinational out_valid when accept and no pending? But handshakes synchronous; okay.
+
+Need ensure match output valid only when out_valid. It is registered pending result. On reset match=0.
+
+Need maybe out_valid should be set only if accepted; yes.
+
+Need include default_nettype none? Can include but maybe not necessary. Only source. Avoid Markdown.
+
+Need consider if out_valid=1, out_ready=1, in_valid=1; in_ready = ~out_valid | out_ready = 1. At edge, both. If old match=1, out_ready sees it. The new match assigned to match at same edge; output after edge valid new. Works. If out_valid=1 and out_ready=1 but no in_valid, out_valid clears and match remains old; irrelevant.
+
+Potential issue if no accepted input but out_valid=1 & out_ready=1: in_ready =1. If in_valid=1 it accepts. If in_valid=0, out_valid clears. Good.
+
+Let's verify sequence with simulation:
+reset state0 outvalid0.
+Cycle1 in_valid=1 bit1 -> in_ready1; next_state=001? state 000 -> {00,1}=001; match_next=(000==101)&&1=0; outvalid1 match0 state001. Output match0 for first bit.
+Cycle2 if out_ready1 and in_valid1 bit0: in_ready=out_ready=1; old match0 transferred; next_state={01,0}? state001 state[1:0]=01 +0 =010; match_next=(001==101)0; outvalid1 match0; state010. Wait last bits 10 should state? After first bit 1: state001 (bits [2]=0,[1]=0,[0]=1). After second bit 0: next = {state[1:0],0}={01,0}=010. Bits [2]=0,[1]=1,[0]=0 = 010 represents last three 0,1,0 (with zero pad) okay. After third bit1: next={state[1:0]=10 +1}=101; match_new=(state==101? state010 no)0. state101. after fourth bit1: match_new=(state101==101)&&1=1; next={state[1:0]=01 +1}=011. Good. Output match1. Overlap: sequence 1011011? Let's test bits 1 0 1 1 0 1 1. Matches at repeat: first at bit4. state after bit4=011 (last three 0,1,1? Actually last three bits 0? Wait bits b2=0,b3=1,b4=1 => state after bit4 should 011 yes [2]=0,[1]=1,[0]=1). bit5 0: match none; next={11,0}=110 (bits1,1,0). bit6 1: state=110, match? Need for bit6 last four bits b3-b6 = 1 1 0 1 =1101 no. next={10,1}=101 (last three 1,0,1) yes. bit7 1: match state101 &1 =1 (last four b4-b7=1 0 1 1). Good overlap. Great.
+
+Need final only source. Ensure no markdown fences. Use module exactly. Use logic. Should we avoid "~out_valid | out_ready" if out_valid logic and out_ready input? okay.
+
+Let's formulate final.

@@ -1,0 +1,11 @@
+{
+  "spec_ref": "artifacts/spec.md",
+  "supplements": [],
+  "rounds": 1,
+  "addendum": "## 实现假设（非阻断）\n\n- 内部 stage 端口名、位宽、valid 语义及流水线寄存器归属由 Planner 一次性冻结；Coder 按冻结接口实现，顶层仅例化连线。\n- Halt-pending 期间：PC 冻结在取到 ECALL 后的当前值；IF/ID 每拍写入 valid=0；ECALL 自身继续 ID→EX→MEM→WB 前进；更年轻指令不得产生寄存器写、dmem 事务或控制重定向。\n- `halted` / `exit_code` 为寄存器输出：ECALL 在 WB 沿提交时置 `halted=1` 并从当时 `x10` 锁存 `exit_code`；TB 可在下一拍起采样。\n- `dbg_reg_data` 为组合读架构寄存器堆（x0 恒 0，不包含前递）；TB 在时钟沿后采样其稳定值。\n- 允许 WB→ID 同拍写读旁路；具体实现方式（写优先或显式 bypass）由 Coder 选择。\n- store 的 rs2 依赖既可用 MEM 级 store-data 前递消除，也可保守暂停一拍；两者均满足 Spec，由 Coder 选择。\n- 外部 TB 提供零等待组合读的 imem/dmem，并在至少一个上升沿保持 `rst_n=0`；RTL 必须在输出级用 `rst_n` 组合屏蔽 `dmem_valid` 及 store 写请求。\n- 面积/功耗优化、是否独立 ALU 模块、寄存器堆放置位置等由 Coder 选择；§8 要求的 8 个文件及模块名必须存在并由顶层使用。",
+  "last_result": {
+    "sufficient": true,
+    "missing": [],
+    "questions": []
+  }
+}

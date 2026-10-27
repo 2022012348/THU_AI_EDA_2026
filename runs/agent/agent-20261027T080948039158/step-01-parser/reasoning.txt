@@ -1,0 +1,92 @@
+We need to judge sufficiency. The spec is extremely detailed. Check for blocking gaps: top-level ports fixed, clock/reset defined, ISA defined, bus handshake defined, ECALL halt defined, file structure defined. Externally observable test expectations largely defined.
+
+Possible ambiguities: dbg_reg_data combinational read "current value" — with register file write at WB clock edge, debug read combinational. Fine.
+
+Potential issue: "rst_n=0 期间（包括第一个复位上升沿之前）dmem_valid 必须为 0" — implementation requirement, fine.
+
+"halt-pending" state during which IF/ID writes valid=0, PC holds; but also need to ensure no new dmem transactions from younger instructions — younger flushed. Fine.
+
+One subtle: ECALL in ID recognized, but if there's an older control transfer redirect same cycle — ECALL not enter halt-pending. Spec says recognized when no older redirect. Fine.
+
+Another subtle: AUIPC/JAL use PC; pipelined. Fine.
+
+Potential contradiction: §3.2 says dmem_rdata combinational read valid entire cycle when dmem_valid=1; load samples at MEM/WB edge. Fine.
+
+Possible blocking: "halted=1 后 ... PC 与 imem_addr 保持停机时的值" — but ECALL commits in WB; PC was frozen at ECALL? During halt-pending PC holds. Fine.
+
+"halted=0 时 exit_code=0" — fine.
+
+Load-use with store rs2: spec allows either pause or MEM forward; not blocking since both correct.
+
+Potential issue: write-first register file requirement; fine.
+
+Missing: how dbg_reg_data behaves for x0 mid... fine.
+
+Potential blocking: none really. Maybe ambiguity about branch/jump in EX while an older instruction in MEM? Since in-order 5-stage, only one instruction in EX. Redirect flush IF/ID, ID/EX. Fine.
+
+Potential issue: ECALL recognized in ID but EX-level older branch in same cycle? "当拍没有更老的控制转移重定向" — older branch is in EX, could be in ID? Actually older instruction than ECALL in ID can only be in EX. If EX has taken branch, redirect flush IF/ID and ID/EX, ECALL in ID flushed. That's the rule. Fine.
+
+But subtle: if ECALL is in ID and a taken branch in EX, the redirect priority: PC target; IF/ID and ID/EX cleared. Fine.
+
+If ECALL enters halt-pending, PC holds; but what if there's a taken branch in EX same cycle as ECALL in ID? Then redirect priority, ECALL flushed, no halt-pending. Spec says "且当拍没有更老的控制转移重定向时进入 halt-pending" clear.
+
+Non-blocking assumptions: internal module ports frozen by Planner; we can note assumption that halt-pending freezes IF and forces valid=0 to IF/ID and ID/EX? Actually ECALL must continue through EX/MEM/WB; ID/EX gets ECALL valid, then subsequent cycles IF/ID valid=0 causing bubbles. Need ensure ECALL propagates. That's implementation detail.
+
+Another potential issue: "ECALL 在 ID 级被识别、且...进入 halt-pending 状态：PC 保持，IF/ID 每拍写入 valid=0" — but also ID/EX must get valid=0 in subsequent cycles so no younger instructions enter; and the ECALL itself is already in ID/EX at end of that cycle? Actually ECALL in ID at cycle N; at end of cycle N, ECALL moves to ID/EX. Then in cycle N+1, IF/ID gets valid=0. Good. But if ECALL is recognized in ID, control signals for ECALL (no reg write, no mem) flow. Fine.
+
+Potential blocking: what about x10 value when ECALL commits—x10 final; all older committed. Fine.
+
+What about "halted=1 后 ... 流水线停止推进（或全部 valid 清零），WB 不得再写寄存器" — but younger instructions may be in pipeline ahead of ECALL? No, ECALL is oldest unreached? Actually younger instructions are after ECALL and were flushed when halt-pending. So when ECALL reaches WB, pipeline behind has bubbles. Good.
+
+Wait: when ECALL is in ID and enters halt-pending, the instructions already in IF (younger) are discarded by valid=0 in IF/ID; but the instruction in IF... yes. Instructions older are in EX/MEM/WB. So when ECALL reaches WB, nothing younger. Fine.
+
+One nuance: During halt-pending while ECALL travels, PC holds at ECALL's... Actually PC at that point points to ECALL+4? Let's see: PC updated each cycle. At cycle N, IF fetched instruction at PC (maybe ECALL+something). Hmm. Let's trace: At cycle N-1, IF fetched ECALL? Suppose ECALL fetched at cycle N-1 into IF/ID at end. At cycle N, ECALL in ID. PC currently points to ECALL+4 (since PC incremented when fetching ECALL). At end of cycle N, PC would go to ECALL+8 normally, but halt-pending freezes PC, so PC stays ECALL+4. IF/ID valid=0 each cycle. imem_addr = PC = ECALL+4 stable. Spec says after halted PC/imem_addr held at halt value. Fine, not contradictory.
+
+But §7.1 says PC update priority: reset > redirect > ECALL halt freeze > load-use > PC+4. Good.
+
+Potential blocking: load-use pause combined with halt-pending? If ECALL in ID? halt-pending freeze priority above load-use. Fine.
+
+Potential issue: "dmem_valid 在 MEM 级存在有效 load/store 时拉高恰好一个周期；复位期间及 halted=1 期间必须为 0". During halt-pending, older loads/stores continue and are valid — allowed. Fine.
+
+Potential issue: exit_code semantics: equals final x10 at halt time; x10 is architectural reg. Fine.
+
+Potential blocking ambiguity: Does ECALL need to be the unique halt? yes.
+
+Potential: branch in EX flushing ID/EX — but if ID has ECALL, flushed correctly.
+
+Potential: "写回在 WB 级时钟沿生效" and "同一拍 ID 读口与 WB 写口命中 ... 写优先" — note ID reads at the same edge WB writes; combinational read port must bypass. Clear.
+
+Potential hidden contradiction: §7.2 store data forwarding at MEM from MEM/WB: "若 MEM/WB 有效且其 rd 等于 store 的 rs2（且非 0、写回有效），则 store_data 取 MEM/WB 的写回值，否则取 EX/MEM 传来的 rs2 值." EX/MEM 传来的 rs2 值 should already be EX-forwarded (from EX/MEM and MEM/WB at EX time). Fine, but this is detail. It says store data in MEM stage forwarded; and §5.3 says store data 取自前递后的 rs2. Slight redundancy but no contradiction: EX forwards then MEM forwards. Fine.
+
+Non-blocking: AUIPC in EX needs PC; fine.
+
+Potential ambiguity: LUI WB = inst[31:12]<<12, ALU result. Fine.
+
+Potential: SLTIU immediate sign-extended then unsigned compare. Clear.
+
+Potential: JALR funct3=000 only. Clear.
+
+Potential: "除 ECALL 外的 system 指令无需实现" fine.
+
+Potential blocking: The requirement "每个流水线寄存器均携带 valid 位" and "不保留无用流水字段" minor tension, not blocking.
+
+Potential blocking: "dbg_reg_data 组合读出其当前值；不含前递" — when WB writes at clock edge and dbg samples? Testbench likely samples after edge; fine. Current architectural value.
+
+I think sufficient=true. Need spec_addendum with short assumptions: internal interface frozen by Planner, halt-pending implementation details (PC freeze, IF/ID valid=0, ID/EX valid=0 for younger), debug read timing, memory model zero-wait, x0, etc. But keep concise and only additions.
+
+We should not ask questions. missing=[].
+
+Need ensure spec_addendum doesn't restate full spec. Add assumptions like:
+- Planner freezes internal stage port names/widths; Coder follows.
+- Halt-pending: PC frozen at value after ECALL fetch (ECALL+4); IF/ID valid cleared each cycle; ECALL continues ID→EX→MEM→WB; younger instructions never gain architectural effects.
+- Halt commit at WB edge; halted/exit_code registered outputs visible next cycle; exit_code latched from x10 at that edge.
+- Debug read: combinational from architectural regfile, x0=0; no forwarding; sampled after clock edge by TB.
+- WB→ID same-cycle bypass assumption allowed.
+- Area/optimization choices left to Coder (e.g., separate ALU module optional), but required 8 files must exist.
+- Testbench provides zero-wait combinational imem/dmem and applies synchronous reset for at least one rising edge; RTL must gate dmem_valid with rst_n combinationally.
+
+Maybe also note: If store rs2 forwarding implemented via stall, still correct; non-blocking.
+
+Also maybe note about "halted=1 后 PC/imem_addr 保持" and dmem_valid=0.
+
+Return JSON.

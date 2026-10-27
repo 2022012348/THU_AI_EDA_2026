@@ -1,0 +1,49 @@
+{
+  "files": [
+    {
+      "path": "rtl/rv32i5.sv",
+      "artifact": "project/rtl/rv32i5.sv",
+      "bytes": 9986
+    },
+    {
+      "path": "rtl/if_stage.sv",
+      "artifact": "project/rtl/if_stage.sv",
+      "bytes": 1961
+    },
+    {
+      "path": "rtl/id_stage.sv",
+      "artifact": "project/rtl/id_stage.sv",
+      "bytes": 10148
+    },
+    {
+      "path": "rtl/ex_stage.sv",
+      "artifact": "project/rtl/ex_stage.sv",
+      "bytes": 10307
+    },
+    {
+      "path": "rtl/mem_stage.sv",
+      "artifact": "project/rtl/mem_stage.sv",
+      "bytes": 5544
+    },
+    {
+      "path": "rtl/wb_stage.sv",
+      "artifact": "project/rtl/wb_stage.sv",
+      "bytes": 1561
+    },
+    {
+      "path": "rtl/hazard_unit.sv",
+      "artifact": "project/rtl/hazard_unit.sv",
+      "bytes": 1844
+    },
+    {
+      "path": "rtl/forwarding_unit.sv",
+      "artifact": "project/rtl/forwarding_unit.sv",
+      "bytes": 1464
+    },
+    {
+      "path": "rtl/regfile.sv",
+      "artifact": "project/rtl/regfile.sv",
+      "bytes": 1762
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "attempts": 3,
+  "plan_ref": "artifacts/plan.json",
+  "rtl_manifest_ref": "artifacts/rtl_manifest_attempt2.json"
+}

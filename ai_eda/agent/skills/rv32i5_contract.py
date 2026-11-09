@@ -135,7 +135,8 @@ _COMMON_ADVANCED_ASSUMPTIONS = (
     "Use the advanced L1+ top-level interface; all listed capability outputs are present. "
     "Unsupported higher-tier event outputs are tied low rather than omitted.",
     "A valid/ready handshake is accepted only on a clock edge with both signals high; "
-    "an accepted request keeps address, write data, and byte enables stable until ready.",
+    "an asserted request keeps address, write data, and byte enables stable until the accepting edge, "
+    "except where the frozen Spec explicitly permits cancellation.",
     "Capability events are single-cycle pulses and are zero during reset and after halted; "
     "dbg_features is the fixed tier value from time zero.",
     "Internal port names, FSM encodings, and helper-file layout are planner-owned choices, "
@@ -389,7 +390,7 @@ def describe_tier_context(project_id: str | None, *, role: str = "planner") -> s
         raise ValueError("role 必须是 planner 或 coder")
 
     lines = [
-        "RV32I fixed tier contract (implementation defaults, not user questions):",
+        "RV32I tier context (implementation defaults; the frozen spec takes precedence on conflicts):",
         f"- Target: L{contract.expected_level} / dbg_features={contract.feature_bits}.",
         "- Required capability outputs: " + ", ".join(contract.required_capability_signals) + ".",
         "- Required RTL files: " + ", ".join(contract.required_modules) + ".",
@@ -407,7 +408,7 @@ def describe_tier_context(project_id: str | None, *, role: str = "planner") -> s
             else ""
         )
         lines.append(
-            "- Seed policy: require a passed, verified "
+            "- Seed eligibility (only when a seed is supplied, not a prerequisite for a fresh run): passed, verified "
             f"L{policy.source_expected_level} run of {policy.source_project_id}{reference}."
         )
     else:

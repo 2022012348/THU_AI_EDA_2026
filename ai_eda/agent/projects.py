@@ -32,6 +32,10 @@ _PROJECTS: dict[str, dict[str, Any]] = {
         "power_testbench_top": "tb_power_agent_rv32i5",
         "task_name": "agent_rv32i5",
         "expected_cpu_level": 0,
+        # 这份共享 TB 的完整仿真约 24 s（13 个测试 + 基准），20 s 的墙钟会把
+        # 仿真中途杀掉，得到 36/24/52 这种飘忽的 check 数。墙钟只是安全网，
+        # 功能超时仍由 TB 内部的 500 周期等待判定。
+        "timeout_seconds": 120,
     },
 }
 

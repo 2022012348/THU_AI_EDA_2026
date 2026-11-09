@@ -5,10 +5,40 @@ from __future__ import annotations
 from pathlib import Path
 
 from ai_eda.agent.projects import get_project
+from ai_eda.agent.skills.l1_icache_probe import add_l1_icache_probe_to_report, run_l1_icache_flush_probe
+from ai_eda.agent.skills.l1_id_hazard_probe import add_l1_id_hazard_to_report, run_l1_id_hazard_probe
+from ai_eda.agent.skills.rtl_structure import inspect_rtl_structure
+from ai_eda.agent.skills.retirement_observer import observe_retirement
+from ai_eda.agent.skills.retire_tail import capture_retire_tail
+from ai_eda.agent.skills.data_bus_observer import observe_data_bus
+from ai_eda.agent.skills.signal_probe import run_signal_probe
+from ai_eda.agent.repair_focus import make_repair_ticket
 from ai_eda.rtl.runner import save_report, test_rtl
 
 from .base import SubAgent
 from .common import combine_files, report_feedback, report_summary
+
+
+def answer_observation_request(runtime, *, files: dict, report: dict, request: dict, attempt: int, request_index: int=1) -> dict:
+    """Tester answers a bounded Modifier question using the current snapshot."""
+    import hashlib
+    suffix='' if request_index==1 else f'_retry{request_index}'
+    snapshot = runtime.write_text_artifact(f'observation_snapshot_attempt{attempt}{suffix}.sv', combine_files(files))
+    allowed = {str(c.get('testcase') or c.get('test') or c.get('name') or '')
+               for c in report.get('checks') or [] if isinstance(c, dict)}
+    if isinstance(report.get('repair_ticket'),dict):
+        allowed.add(report['repair_ticket']['testcase'])
+    request_ref = runtime.write_json_artifact(f'observation_request_attempt{attempt}{suffix}.json', {
+        'source': 'modifier', 'request': request,
+        'file_hashes': {path: hashlib.sha256(text.encode()).hexdigest() for path, text in files.items()}})
+    runtime.check_cancel()
+    observation = run_signal_probe(project=runtime.options.get('project') or {},
+        combined_path=runtime.run_dir / snapshot, output_dir=runtime.run_dir / f'modifier-probe-{attempt:02d}{suffix}',
+        plan=request, allowed_tests=allowed)
+    runtime.check_cancel()
+    runtime.write_json_artifact(f'observation_answer_attempt{attempt}{suffix}.json',
+        {'source': 'tester', 'request_ref': request_ref, 'observation': observation})
+    return observation
 
 
 
@@ -64,6 +94,44 @@ class TesterAgent(SubAgent):
             run_dir=tester_dir,
         )
         self.check_cancel()
+        report['teacher_checks'] = [dict(c) for c in report.get('checks') or [] if isinstance(c,dict)]
+        if report.get('stage') == 'simulation' and not report.get('passed'):
+            report['data_bus_observation'] = observe_data_bus(
+                project=project, combined_path=combined_path, output_dir=tester_dir / 'data_bus_observer')
+            self.check_cancel()
+            report['structural_diagnostics'] = inspect_rtl_structure(
+                combined_path, plan.get('top_module'), tester_dir / 'structure')
+            if project.get('testbench_top') == 'tb_agent_rv32i5':
+                report['retirement_observation'] = observe_retirement(
+                    project=project, combined_path=combined_path, output_dir=tester_dir / 'retirement_observer')
+            # A halt timeout hides the loop body: record the last retirements so the
+            # Modifier can see which PCs repeat instead of only a frozen imem_addr.
+            if any('等待 halted 超时' in str(check.get('detail') or '')
+                   for check in report.get('checks') or [] if isinstance(check, dict)):
+                report['retire_tail'] = capture_retire_tail(
+                    project=project, combined_path=combined_path, output_dir=tester_dir / 'retire_tail')
+            self.check_cancel()
+        if project.get("id") == "rv32i5_cache" and report.get("stage") == "simulation":
+            probe = run_l1_icache_flush_probe(
+                plan=plan, files=files, combined_path=combined_path,
+                output_dir=tester_dir / "l1_icache_flush_edge",
+                timeout_seconds=int(project.get("timeout_seconds", 20)),
+            )
+            add_l1_icache_probe_to_report(report, probe)
+            control_probe = run_l1_id_hazard_probe(
+                plan=plan, files=files, combined_path=combined_path,
+                output_dir=tester_dir / "l1_id_hazard",
+                timeout_seconds=int(project.get("timeout_seconds", 20)),
+            )
+            # Do not let a repair evade a previously applicable verification
+            # by changing its topology so the checker no longer recognizes it.
+            control_required = bool(self.context.get("id_hazard_required"))
+            add_l1_id_hazard_to_report(report, control_probe, required=control_required)
+            if control_probe.get("status") not in {"not_covered", "error"}:
+                self.save_context(id_hazard_required=True)
+        self.check_cancel()
+        if not report.get('passed'):
+            report['repair_ticket'] = make_repair_ticket(report)
         report_path = save_report(tester_dir, report)
         self.save_context(
             attempts=int(self.context.get("attempts", 0)) + 1,
@@ -92,6 +160,8 @@ class TesterAgent(SubAgent):
                     "rtl_manifest": manifest_ref,
                     "report": report_ref,
                     "combined_rtl": combined_ref,
+                    **({"diagnostic_evidence": self.runtime.options["diagnostic_evidence_ref"]}
+                       if isinstance(self.runtime.options.get("diagnostic_evidence_ref"), str) else {}),
                 },
             },
             attempt=attempt,

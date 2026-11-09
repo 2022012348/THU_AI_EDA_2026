@@ -29,10 +29,12 @@ module icache (
     logic [31:0]  refill_tag;
     logic [3:0]   refill_idx;
     logic [1:0]   refill_epoch;
+    logic         discard_refill;
     logic [127:0] refill_data;
     logic [1:0]   refill_word;
 
     logic         resp_valid_r;
+    logic [1:0]   resp_epoch;
     logic [31:0]  resp_data_r;
 
     logic [3:0]   req_idx;
@@ -58,12 +60,12 @@ module icache (
         endcase
     end
 
-    assign cpu_req_ready = rst_n && !halted && (state == S_IDLE) && !resp_valid_r;
+    assign cpu_req_ready = rst_n && !halted && !flush && (state == S_IDLE) && !resp_valid_r;
 
     assign mem_req_valid = rst_n && !halted && (state == S_REFILL);
     assign mem_req_addr  = refill_base + {refill_cnt, 2'b00};
 
-    assign cpu_resp_valid = resp_valid_r;
+    assign cpu_resp_valid = resp_valid_r && !flush && (resp_epoch == flush_epoch);
     assign cpu_resp_data  = resp_data_r;
 
     always_ff @(posedge clk) begin
@@ -74,9 +76,11 @@ module icache (
             refill_tag   <= 32'b0;
             refill_idx   <= 4'b0;
             refill_epoch <= 2'b0;
+            discard_refill <= 1'b0;
             refill_data  <= 128'b0;
             refill_word  <= 2'b0;
             resp_valid_r <= 1'b0;
+            resp_epoch   <= 2'b0;
             resp_data_r  <= 32'b0;
             for (int i = 0; i < 16; i = i + 1) begin
                 valid_arr[i] <= 1'b0;
@@ -88,14 +92,14 @@ module icache (
         end else begin
             resp_valid_r <= 1'b0;
 
-            // flush 不能打断已经发出的外部 refill 请求，否则 imem_addr/
-            // imem_valid 会在 imem_ready 前变化。让 refill 完成，仅通过
-            // refill_epoch 丢弃过期数据。
+            // A request already asserted stays stable through ready. A flush
+            // marks it stale and prevents additional words from being issued.
             case (state)
                 S_IDLE: begin
                     if (cpu_req_valid && cpu_req_ready) begin
                         if (hit) begin
                             resp_valid_r <= 1'b1;
+                            resp_epoch   <= flush_epoch;
                             resp_data_r  <= hit_data;
                         end else begin
                             state        <= S_REFILL;
@@ -104,40 +108,46 @@ module icache (
                             refill_tag   <= req_tag;
                             refill_idx   <= req_idx;
                             refill_epoch <= flush_epoch;
+                            discard_refill <= 1'b0;
                             refill_data  <= 128'b0;
                             refill_word  <= req_word;
                         end
                     end
                 end
                 S_REFILL: begin
+                    // flush may coincide with the last response, before the
+                    // epoch register advances. Remember it explicitly while
+                    // the currently asserted bus request waits for acceptance.
+                    if (flush || flush_epoch != refill_epoch)
+                        discard_refill <= 1'b1;
                     if (mem_req_valid && mem_req_ready) begin
-                        case (refill_cnt)
-                            2'd0: refill_data[31:0]   <= mem_resp_data;
-                            2'd1: refill_data[63:32]  <= mem_resp_data;
-                            2'd2: refill_data[95:64]  <= mem_resp_data;
-                            2'd3: refill_data[127:96] <= mem_resp_data;
-                            default: ;
-                        endcase
-                        if (refill_cnt == 2'd3) begin
-                            // 即使期间发生 redirect，也把有效行安装进 I-Cache；
-                            // 仅抑制过期 refill 的响应。否则每次分支都会丢掉
-                            // 正在填充的行，循环永远无法 reuse。
-                            valid_arr[refill_idx] <= 1'b1;
-                            tag_arr[refill_idx]   <= refill_tag;
-                            data_arr[refill_idx]  <= refill_data |
-                                ({96'b0, mem_resp_data} << {refill_cnt, 5'b00000});
-                            if (flush_epoch == refill_epoch) begin
+                        if (discard_refill || flush || flush_epoch != refill_epoch) begin
+                            state <= S_IDLE;
+                        end else begin
+                            case (refill_cnt)
+                                2'd0: refill_data[31:0]   <= mem_resp_data;
+                                2'd1: refill_data[63:32]  <= mem_resp_data;
+                                2'd2: refill_data[95:64]  <= mem_resp_data;
+                                2'd3: refill_data[127:96] <= mem_resp_data;
+                                default: ;
+                            endcase
+                            if (refill_cnt == 2'd3) begin
+                                valid_arr[refill_idx] <= 1'b1;
+                                tag_arr[refill_idx]   <= refill_tag;
+                                data_arr[refill_idx]  <= refill_data |
+                                    ({96'b0, mem_resp_data} << {refill_cnt, 5'b00000});
                                 resp_valid_r <= 1'b1;
+                                resp_epoch   <= refill_epoch;
                                 case (refill_word)
                                     2'd0: resp_data_r <= refill_data[31:0];
                                     2'd1: resp_data_r <= refill_data[63:32];
                                     2'd2: resp_data_r <= refill_data[95:64];
                                     default: resp_data_r <= mem_resp_data;
                                 endcase
+                                state <= S_IDLE;
+                            end else begin
+                                refill_cnt <= refill_cnt + 2'd1;
                             end
-                            state <= S_IDLE;
-                        end else begin
-                            refill_cnt <= refill_cnt + 2'd1;
                         end
                     end
                 end

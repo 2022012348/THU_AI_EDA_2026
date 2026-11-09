@@ -387,6 +387,38 @@ module rv32i5 (
         .fwd_b           (fwd_b)
     );
 
+    // Do not start sequential fetches while an older control transfer is
+    // unresolved. This avoids issuing wrong-path refill traffic immediately
+    // before a branch redirects, while keeping normal ALU fetches pipelined.
+    logic ic_cpu_req_ready;
+    logic ic_cpu_req_valid;
+    logic fetch_control_pending;
+    logic fetch_request_waiting;
+    logic [31:0] fetch_request_addr;
+    assign fetch_control_pending =
+        (if2id_valid && ((if2id_insn[6:0] == 7'b1100011) ||
+                         (if2id_insn[6:0] == 7'b1101111) ||
+                         (if2id_insn[6:0] == 7'b1100111))) ||
+        (id2ex_valid && (id2ex_branch || id2ex_jump)) || redirect_valid;
+    // One-entry request buffer decouples IF stalls from the cache valid/ready
+    // channel. A redirect explicitly cancels an unaccepted internal request.
+    assign if_cpu_req_ready = rst_n && !halted && !flush &&
+                              !fetch_request_waiting && !fetch_control_pending;
+    assign ic_cpu_req_valid = fetch_request_waiting && !flush;
+    always_ff @(posedge clk) begin
+        if (!rst_n || flush) begin
+            fetch_request_waiting <= 1'b0;
+            fetch_request_addr <= 32'b0;
+        end else begin
+            if (if_cpu_req_valid && if_cpu_req_ready) begin
+                fetch_request_waiting <= 1'b1;
+                fetch_request_addr <= if_cpu_req_addr;
+            end else if (ic_cpu_req_valid && ic_cpu_req_ready) begin
+                fetch_request_waiting <= 1'b0;
+            end
+        end
+    end
+
     // ---------------------------------------------------------------
     // I-Cache
     // ---------------------------------------------------------------
@@ -396,9 +428,9 @@ module rv32i5 (
         .halted         (halted),
         .flush          (flush),
         .flush_epoch    (flush_epoch),
-        .cpu_req_valid  (if_cpu_req_valid),
-        .cpu_req_addr   (if_cpu_req_addr),
-        .cpu_req_ready  (if_cpu_req_ready),
+        .cpu_req_valid  (ic_cpu_req_valid),
+        .cpu_req_addr   (fetch_request_addr),
+        .cpu_req_ready  (ic_cpu_req_ready),
         .cpu_resp_valid (if_cpu_resp_valid),
         .cpu_resp_data  (if_cpu_resp_data),
         .mem_req_valid  (ic_mem_req_valid),

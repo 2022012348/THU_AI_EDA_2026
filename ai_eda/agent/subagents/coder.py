@@ -7,10 +7,12 @@ from pathlib import Path
 
 from ai_eda.model.client import RTL_SYSTEM_PROMPT
 from ai_eda.rtl.runner import extract_rtl
-from ai_eda.agent.skills.rv32i5_l1_reference import load_reference
+from ai_eda.agent.skills.rv32i5_l1_reference import build_reference_plan, load_reference
+from ai_eda.agent.skills.rv32i5_contract import coder_context
+from ai_eda.agent.rtl_contracts import extract_module_header
 
 from .base import SubAgent
-from .common import RV32I_L1_CODE_PATTERNS, RV32I_PIPELINE_CHECKLIST, safe_project_path
+from .common import RV32I_L1_CODE_PATTERNS, RV32I_PIPELINE_CHECKLIST, safe_project_path, extract_json_payload, validate_modifier_files
 
 
 def _architecture_block(plan: dict) -> str:
@@ -40,6 +42,43 @@ class CoderAgent(SubAgent):
     # 把预算留给完整的 SystemVerilog 文件。
     MODEL_OPTIONS = {"thinking": False}
 
+    def _coordinated_files(self, spec: str, plan: dict, checklist: str) -> dict[str, str]:
+        prompt = (
+            '在同一次实现中联合生成整个 RTL 工程，让所有模块共享同一套时序、控制编码和请求状态。'
+            '所有计划文件必须完整返回，每文件只包含其计划模块；禁止遗漏辅助模块或使用占位实现。'
+            '严格遵循冻结的端口合同、架构和规格；跨模块逐拍推演接受、响应、hold、bubble、flush、'
+            '前递和退休，确保一条指令的 PC/指令/数据在整条路径中对应。'
+            '只返回 JSON：{"files":[{"path":"rtl/module.sv","content":"完整 RTL"}]}。'
+            '\n\nPlan:\n' + json.dumps(plan, ensure_ascii=False) + '\n\nSpec:\n' + spec + checklist
+        )
+        event = self.runtime.begin_event('coder', self.node_type, self.title + ' · coordinated project', prompt)
+        event.update(implementation='model', generation_mode='coordinated')
+        messages = [{'role': 'system', 'content': RTL_SYSTEM_PROMPT + '\nReturn the complete project as the requested JSON files object.'},
+                    {'role': 'user', 'content': prompt}]
+        for attempt in range(2):
+            result = self.runtime.call_model_messages(event, messages, model_options=self.MODEL_OPTIONS)
+            answer = result.get('answer') or ''
+            try:
+                files = validate_modifier_files(extract_json_payload(answer), plan)
+                expected = {module['file'] for module in plan['modules']}
+                if set(files) != expected:
+                    raise ValueError('缺少计划文件：' + ', '.join(sorted(expected - set(files))))
+                for module in plan['modules']:
+                    extract_module_header(files[module['file']], module['name'])
+                break
+            except ValueError as error:
+                if attempt:
+                    raise ValueError(f'联合 Coder 输出无效：{error}') from error
+                messages.extend([{'role': 'assistant', 'content': answer}, {'role': 'user', 'content':
+                    f'工程校验失败：{error}。保持规格，修正接口或文件完整性后返回完整工程 JSON。'}])
+        for relative, rtl in files.items():
+            target = safe_project_path(self.runtime.run_dir, relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(rtl, encoding='utf-8')
+        self.finish(event, 'info', response=f'Generated {len(files)} coordinated model RTL files.',
+                    usage=result.get('usage'))
+        return files
+
     def run(
         self,
         planner_handoff: Path,
@@ -63,9 +102,36 @@ class CoderAgent(SubAgent):
             if project_id.startswith("rv32i5")
             else ""
         )
+        project_checklist += "\n" + coder_context(project_id)
         files: dict[str, str] = {}
+        sources: dict[str, str] = {}
         existing = existing_files or {}
-        reference = load_reference(str((self.runtime.options.get("project") or {}).get("id") or ""))
+        use_reference = (
+            project_id == "rv32i5_cache"
+            and self.runtime.options.get("use_l1_reference", True)
+        )
+        reference = load_reference(project_id) if use_reference else {}
+        if use_reference:
+            if plan.get("top_module") != "rv32i5":
+                raise ValueError("L1 参考工程要求顶层模块为 rv32i5")
+            # The original Planner output remains in plan.json for audit.  All
+            # downstream agents receive the effective reference-derived plan.
+            plan = build_reference_plan(reference)
+            plan_ref = self.runtime.write_json_artifact("plan_reference.json", plan)
+            # Recreate the whole known-good bundle; never mix a partial old run
+            # or a model-generated file with incompatible reference interfaces.
+            existing = {}
+            start_module = None
+        elif plan.get("implementation_source") == "reference":
+            # A mode change on resume regenerates the entire project against
+            # the reference-derived contract, with truthful provenance.
+            plan = dict(plan)
+            plan["implementation_source"] = "model"
+            plan["notes"] = ("Model-generated implementation of the reference-derived interface contract; "
+                             "no reference RTL was copied in this run.")
+            plan_ref = self.runtime.write_json_artifact("plan_model_resume.json", plan)
+            existing = {}
+            start_module = None
         modules = plan["modules"]
         start_index = 0
         if start_module:
@@ -74,9 +140,15 @@ class CoderAgent(SubAgent):
                     start_index = index
                     break
         architecture_block = _architecture_block(plan)
+        if project_id.startswith('rv32i5') and not use_reference and not existing and not start_module and len(modules) > 1:
+            files = self._coordinated_files(effective_spec, plan, project_checklist + architecture_block)
+            sources = {path: 'model' for path in files}
         for index, module in enumerate(modules):
+            if module['file'] in files:
+                continue
             if index < start_index and module["file"] in existing:
                 files[module["file"]] = existing[module["file"]]
+                sources[module["file"]] = "resume"
                 continue
             if module["file"] in reference:
                 rtl = reference[module["file"]]
@@ -84,9 +156,11 @@ class CoderAgent(SubAgent):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(rtl, encoding="utf-8")
                 files[module["file"]] = rtl
+                sources[module["file"]] = "reference"
                 event = self.runtime.begin_event(
                     "coder", self.node_type, f"{self.title} · {module['name']}", "参考实现"
                 )
+                event.update(module=module["name"], file=module["file"], implementation="reference")
                 self.finish(
                     event,
                     "info",
@@ -109,6 +183,8 @@ class CoderAgent(SubAgent):
             event = self.runtime.begin_event(
                 "coder", self.node_type, f"{self.title} · {module['name']}", prompt
             )
+            event.update(module=module["name"], file=module["file"], implementation="model")
+            self.runtime.persist()
             result = self.runtime.call_model(
                 event, prompt, RTL_SYSTEM_PROMPT, model_options=self.MODEL_OPTIONS
             )
@@ -119,6 +195,7 @@ class CoderAgent(SubAgent):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(rtl, encoding="utf-8")
             files[module["file"]] = rtl
+            sources[module["file"]] = "model"
             artifact_dir = self.runtime.run_dir / f"step-{event['step']:02d}-{event['node_id']}"
             (artifact_dir / "generated.sv").write_text(rtl, encoding="utf-8")
             self.save_context(plan_ref=plan_ref, last_file=self.runtime.artifact_ref(target))
@@ -130,18 +207,9 @@ class CoderAgent(SubAgent):
                 reasoning=event.get("reasoning"),
                 usage=event.get("usage"),
             )
-        manifest = {
-            "files": [
-                {
-                    "path": path,
-                    "artifact": self.runtime.artifact_ref(
-                        safe_project_path(self.runtime.run_dir, path)
-                    ),
-                    "bytes": len(content.encode("utf-8")),
-                }
-                for path, content in files.items()
-            ]
-        }
+        manifest = self.runtime.snapshot_rtl_manifest(files, "coder")
+        for entry in manifest["files"]:
+            entry["implementation"] = sources[entry["path"]]
         manifest_ref = self.runtime.write_json_artifact("rtl_manifest.json", manifest)
         self.save_context(plan_ref=plan_ref, rtl_manifest_ref=manifest_ref)
         return self.runtime.write_handoff(

@@ -18,12 +18,21 @@ from ai_eda.api_key import resolve_api_key
 from .prompts import DEFAULT_SYSTEM_PROMPT, RTL_SYSTEM_PROMPT
 
 
+class EmptyModelResponseError(RuntimeError):
+    """An empty final answer, with the server finish reason for retry policy."""
+
+    def __init__(self, message: str, finish_reason: str | None, usage: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.finish_reason = finish_reason
+        self.usage = usage
+
+
 class ModelClient:
     """课程实验共用的 DeepSeek 单模型客户端。"""
 
     # 当前课程默认使用 Flash：速度快、成本低，适合 Prompt 实验的重复采样。
-    MODEL_NAME = "deepseek-flash"
-    BASE_URL = "https://api.deepseek.com"
+    MODEL_NAME = "DeepSeek-V4.1-Flash-1017"
+    BASE_URL = "https://llmapi.paratera.com/v1"
 
     # 如需更强的复杂 RTL / Agent 推理能力，可将上一行改为：
     # MODEL_NAME = "deepseek-v4-pro"
@@ -48,7 +57,9 @@ class ModelClient:
         self.max_tokens = max_tokens
         self.thinking = thinking
         self.reasoning_effort = reasoning_effort
-        self.client = OpenAI(api_key=api_key, base_url=self.BASE_URL)
+        # Agent retries must be visible to its call budget and usage ledger;
+        # SDK-level retries would otherwise add hidden requests.
+        self.client = OpenAI(api_key=api_key, base_url=self.BASE_URL, max_retries=0, timeout=120.0)
 
     def _complete(self, messages: list[dict[str, str]]) -> str:
         """向 DeepSeek 发送完整消息历史并取回最终文本。"""
@@ -63,7 +74,7 @@ class ModelClient:
         reasoning: str | None,
         usage: dict[str, Any] | None,
         attempts: int,
-    ) -> RuntimeError:
+    ) -> EmptyModelResponseError:
         """把空回答整理成可操作的错误信息，便于区分截断与偶发空响应。"""
         details: list[str] = []
         if finish_reason == "length":
@@ -85,7 +96,7 @@ class ModelClient:
             )
         else:
             suggestion = "这是服务端偶发空响应，可稍后重试；若持续出现，请检查模型服务状态或换用更长的 max_tokens。"
-        return RuntimeError("模型没有返回最终文本内容（" + "；".join(details) + "）。" + suggestion)
+        return EmptyModelResponseError("模型没有返回最终文本内容（" + "；".join(details) + "）。" + suggestion, finish_reason, usage)
 
     def _complete_detail(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         """返回最终回答、可选推理文本及 token 用量。

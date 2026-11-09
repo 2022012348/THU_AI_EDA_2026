@@ -19,6 +19,8 @@ from ai_eda.config import (
 from ai_eda.model.client import ModelClient
 from ai_eda.rtl.runner import _run_component, test_rtl
 from ai_eda.agent.subagents.common import combine_files, report_feedback
+from ai_eda.agent.skills.l1_icache_probe import add_l1_icache_probe_to_report, run_l1_icache_flush_probe
+from ai_eda.agent.skills.l1_id_hazard_probe import add_l1_id_hazard_to_report, run_l1_id_hazard_probe
 
 HANDOFF_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
@@ -351,6 +353,7 @@ def _write_metadata(
     finished_at: str,
     attempts: int,
     max_repair_attempts: int,
+    use_l1_reference: bool = True,
     temperature: float,
     max_tokens: int,
     thinking: bool,
@@ -359,6 +362,8 @@ def _write_metadata(
     design_name: str | None = None,
     project_id: str | None = None,
     resumed_from: str | None = None,
+    resume_tester_attempt: int | None = None,
+    resume_retest_checkpoint: bool = False,
 ) -> None:
     project = get_project(project_id)
     metadata = {
@@ -371,6 +376,7 @@ def _write_metadata(
         "finished_at": finished_at,
         "attempts": attempts,
         "max_repair_attempts": max_repair_attempts,
+        "use_l1_reference": use_l1_reference,
         "max_tester_attempts": max_repair_attempts + 1,
         "model": ModelClient.MODEL_NAME,
         "base_url": ModelClient.BASE_URL,
@@ -386,6 +392,9 @@ def _write_metadata(
         metadata["design_name"] = design_name
     if resumed_from:
         metadata["resumed_from"] = resumed_from
+    if resume_tester_attempt is not None:
+        metadata["resume_tester_attempt"] = resume_tester_attempt
+        metadata["resume_retest_checkpoint"] = bool(resume_retest_checkpoint)
     _write_json(run_dir / "metadata.json", metadata)
 
 
@@ -664,13 +673,17 @@ def list_agent_runs(project_id: str | None = None, limit: int = 40) -> list[dict
         attempts = max((int(event.get("attempt", 1)) for event in events), default=1)
         output_tokens = sum(
             int(
-                event.get("output_tokens")
+                sum(int(call.get('output_tokens') or 0) for call in event['model_call_usage'])
+                if event.get('model_call_usage') else event.get("output_tokens")
                 or (event.get("usage") or {}).get("completion_tokens")
                 or 0
             )
             for event in events
             if isinstance(event, dict)
         )
+        call_usage = [call for event in events if isinstance(event, dict)
+                      for call in event.get('model_call_usage') or []]
+        input_tokens = sum(int((call.get('usage') or {}).get('prompt_tokens') or 0) for call in call_usage)
         metrics = report.get("metrics") or {}
         capability = report.get("cpu_capability") or {}
         benchmarks = ((report.get("performance") or {}).get("benchmarks") or [])
@@ -696,6 +709,9 @@ def list_agent_runs(project_id: str | None = None, limit: int = 40) -> list[dict
                 "event_count": len(events),
                 "attempts": attempts,
                 "output_tokens": output_tokens or None,
+                "input_tokens": input_tokens or None,
+                "input_usage_complete": bool(call_usage) and all(
+                    isinstance((call.get('usage') or {}).get('prompt_tokens'), (int, float)) for call in call_usage),
                 # 兼容旧客户端字段；值同样只表示输出 token。
                 "total_tokens": output_tokens or None,
                 "area": metrics.get("area"),
@@ -755,8 +771,10 @@ def retest_agent_run(run_id: str) -> dict[str, Any]:
 
     # 顶层模块从 plan artifact / result 中读取。
     top_module = None
-    plan_candidates = [run_dir / "artifacts" / "plan.json"]
-    plan_candidates += sorted((run_dir / "artifacts").glob("plan*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    plan = None
+    # Prefer the most recent effective plan: a Modifier may have updated an
+    # internal interface after the original Planner wrote plan.json.
+    plan_candidates = sorted((run_dir / "artifacts").glob("plan*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     for plan_path in plan_candidates:
         if not plan_path.is_file():
             continue
@@ -794,6 +812,26 @@ def retest_agent_run(run_id: str) -> dict[str, Any]:
         expected_cpu_level=project.get("expected_cpu_level"),
         rtl_top_module=top_module,
     )
+    if project.get("id") == "rv32i5_cache" and report.get("stage") == "simulation":
+        probe = run_l1_icache_flush_probe(
+            plan=plan if isinstance(plan, dict) else {}, files=files, combined_path=combined_path,
+            output_dir=retest_dir / "l1_icache_flush_edge",
+            timeout_seconds=int(project.get("timeout_seconds", 20)),
+        )
+        add_l1_icache_probe_to_report(report, probe)
+        control_probe = run_l1_id_hazard_probe(
+            plan=plan if isinstance(plan, dict) else {}, files=files, combined_path=combined_path,
+            output_dir=retest_dir / "l1_id_hazard",
+            timeout_seconds=int(project.get("timeout_seconds", 20)),
+        )
+        previous_report = payload.get("report") or {}
+        previous_checks = previous_report.get("directed_checks") if isinstance(previous_report, dict) else []
+        was_covered = any(
+            isinstance(item, dict) and item.get("name") == "l1_id_hazard"
+            and item.get("status") in {"passed", "failed"}
+            for item in (previous_checks or [])
+        )
+        add_l1_id_hazard_to_report(report, control_probe, required=was_covered)
     report["retested_at"] = _now()
     _write_json(retest_dir / "retest_report.json", report)
     payload["report"] = report

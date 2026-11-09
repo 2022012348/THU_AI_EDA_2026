@@ -27,6 +27,10 @@ def report_summary(report: dict[str, Any] | None) -> str:
             summary += f" Verified CPU level: L{level}."
         return summary
     checks = report.get("checks") or []
+    if report.get("teacher_passed") is True:
+        details = ", ".join(item.get("name", "check") for item in checks[:4])
+        suffix = f"; directed checks: {details}" if details else ""
+        return f"Teacher TB passed, but additional verification did not pass{suffix}."
     failed = ", ".join(item.get("name", "check") for item in checks[:4])
     suffix = f"; failed checks: {failed}" if failed else ""
     return f"Teacher TB failed ({stage_label(report.get('stage'))}){suffix}."

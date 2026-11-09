@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -11,6 +12,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from collections import deque
 
 from ai_eda.config import PROJECT_ROOT, PROMPT_RUNS_ROOT, TASKS_ROOT
 from ai_eda.model.client import DEFAULT_SYSTEM_PROMPT, ModelClient
@@ -50,6 +52,63 @@ def parse_testbench_output(output: str) -> tuple[list[dict[str, Any]], list[dict
             name, separator, detail = line[7:].partition(" — ")
             checks.append({"name": name, "detail": detail if separator else ""})
     return trace, checks
+
+
+def parse_partial_testbench_output(output: str) -> tuple[list, list, dict]:
+    """Keep bounded, representative evidence from potentially enormous logs."""
+    checks = {}
+    per_test = {}
+    trace_count = check_count = omitted_checks = 0
+    tail = deque(maxlen=64)
+    for line in io.StringIO(output):
+        if line.startswith('AI_EDA_TRACE|'):
+            rows, _ = parse_testbench_output(line)
+            if not rows:
+                continue
+            row = rows[0]
+            item = (trace_count, row)
+            trace_count += 1
+            tail.append(item)
+            test = str(row.get('test') or row.get('testcase') or 'unknown')
+            if test not in per_test and len(per_test) < 48:
+                per_test[test] = ([], deque(maxlen=4))
+            if test in per_test:
+                head, last = per_test[test]
+                if len(head) < 4:
+                    head.append(item)
+                last.append(item)
+        elif line.startswith('CHECK: '):
+            _, found = parse_testbench_output(line)
+            if not found:
+                continue
+            check_count += 1
+            check = found[0]
+            key = (check['name'], check['detail'])
+            if key in checks:
+                checks[key]['count'] += 1
+            elif len(checks) < 256:
+                checks[key] = dict(check, count=1)
+            else:
+                omitted_checks += 1
+    selected = {index: row for index, row in tail}
+    for head, last in per_test.values():
+        selected.update(head)
+        selected.update(last)
+    return ([selected[index] for index in sorted(selected)], list(checks.values()),
+            {'trace_events_observed': trace_count, 'check_occurrences_observed': check_count,
+             'omitted_check_occurrences': omitted_checks, 'trace_is_sampled': trace_count > len(selected)})
+
+
+def _retain_simulation_log(stdout: str, run_dir: Path | None) -> tuple[str, str | None]:
+    log = None
+    if run_dir is not None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / 'simulation_stdout.log'
+        path.write_text(stdout, encoding='utf-8')
+        log = str(path)
+    if len(stdout) <= 20000:
+        return stdout, log
+    return (stdout[:4000] + '\n[output excerpt; complete log saved separately when available]\n' + stdout[-16000:], log)
 
 
 def _testbench_fields(line: str) -> dict[str, Any]:
@@ -366,6 +425,15 @@ def test_rtl(
         except subprocess.TimeoutExpired as error:
             stdout = error.stdout if isinstance(error.stdout, str) else (error.stdout or b"").decode("utf-8", "replace")
             stderr = error.stderr if isinstance(error.stderr, str) else (error.stderr or b"").decode("utf-8", "replace")
+            # A wall-clock timeout can occur after many useful assertions and
+            # trace events. Preserve those observed failures for the repairer;
+            # partial output never implies the teacher suite completed/passed.
+            trace, checks, diagnostic_counts = parse_partial_testbench_output(stdout)
+            checks.append({
+                "name": "simulation_timeout",
+                "detail": f"教师 TB 仿真超过 {timeout_seconds} s；输出不完整，保留已观察检查。需区分架构死循环、握手卡住、组合事件不收敛与运行过慢。",
+            })
+            stdout, stdout_log = _retain_simulation_log(stdout, run_dir)
             return {
                 "task_name": task_name,
                 "rtl_path": str(rtl_path),
@@ -376,25 +444,35 @@ def test_rtl(
                 "return_code": None,
                 "stdout": stdout,
                 "stderr": stderr,
-                "trace": [],
-                "checks": [{
-                    "name": "simulation_timeout",
-                    "detail": f"教师 TB 仿真超过 {timeout_seconds} s，RTL 可能未停机、死循环或握手无法完成。",
-                }],
+                "trace": trace,
+                "checks": checks,
+                "partial_output": True,
+                "diagnostic_counts": diagnostic_counts,
+                "stdout_log": stdout_log,
             }
-        trace, checks = parse_testbench_output(simulation_result.stdout)
+        raw_stdout = simulation_result.stdout
+        diagnostic_counts = None
+        if len(raw_stdout) > 20000:
+            trace, checks, diagnostic_counts = parse_partial_testbench_output(raw_stdout)
+        else:
+            trace, checks = parse_testbench_output(raw_stdout)
+        stdout, stdout_log = _retain_simulation_log(raw_stdout, run_dir)
         report = {
             "task_name": task_name,
             "rtl_path": str(rtl_path),
             "passed": simulation_result.returncode == 0,
             "stage": "simulation",
             "return_code": simulation_result.returncode,
-            "stdout": simulation_result.stdout,
+            "stdout": stdout,
+            "stdout_log": stdout_log,
             "stderr": simulation_result.stderr,
             "trace": trace,
             "checks": checks,
         }
-        report.update(parse_cpu_testbench_output(simulation_result.stdout))
+        if diagnostic_counts:
+            report['diagnostic_counts'] = diagnostic_counts
+        # Capability/suite verdicts must use the complete, unabridged output.
+        report.update(parse_cpu_testbench_output(raw_stdout))
         if expected_cpu_level is not None:
             report.setdefault("cpu_capability", {})["expected_level"] = expected_cpu_level
         if any(not suite["passed"] for suite in report.get("test_suites", []) if "passed" in suite and not suite.get("skipped")):

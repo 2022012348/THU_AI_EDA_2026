@@ -100,7 +100,11 @@ def _check_fields(check: Any) -> tuple[str, str, str]:
 def _group_checks(checks: Any) -> tuple[list[dict[str, Any]], int]:
     records = checks if isinstance(checks, list) else []
     grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    total = 0
     for index, check in enumerate(records):
+        count = check.get('count', 1) if isinstance(check, dict) else 1
+        count = count if type(count) is int and count > 0 else 1
+        total += count
         testcase, name, detail = _check_fields(check)
         key = (testcase, name, detail)
         group = grouped.get(key)
@@ -109,18 +113,18 @@ def _group_checks(checks: Any) -> tuple[list[dict[str, Any]], int]:
                 "testcase": testcase,
                 "name": name,
                 "detail": detail,
-                "count": 1,
+                "count": count,
                 "first_index": index,
                 "last_index": index,
             }
         else:
-            group["count"] += 1
+            group["count"] += count
             group["last_index"] = index
     groups = sorted(
         grouped.values(),
         key=lambda item: (-item["count"], item["testcase"], item["name"], item["detail"]),
     )
-    return groups, len(records)
+    return groups, total
 
 
 def _compact_mapping(value: Any, *, max_fields: int = 20) -> dict[str, Any]:
@@ -306,6 +310,27 @@ def summarize_cpu_report(
         for event in traces[last_start:]
     ]
 
+    # Preserve a few failure-adjacent events per failed test rather than only
+    # the first/last events of the entire run, which can hide early root causes.
+    failing_tests = []
+    for group in all_groups:
+        name = group["testcase"]
+        if name not in failing_tests:
+            failing_tests.append(name)
+    failure_trace_samples = []
+    for name in failing_tests[:12]:
+        rows = [event for event in traces if isinstance(event, dict)
+                and str(event.get("test") or event.get("testcase") or "") == name]
+        evidence = [event for event in rows
+                    if "fail" in str(event.get("detail") or "").lower()
+                    or "timeout" in str(event.get("event") or "").lower()]
+        chosen = evidence[:2] if evidence else rows[-2:]
+        if chosen:
+            failure_trace_samples.append({
+                "testcase": name,
+                "events": [_compact_trace_event(event, text_limit=360) for event in chosen],
+            })
+
     score, score_components = _failure_score(
         passed=passed,
         stage=stage,
@@ -349,6 +374,7 @@ def summarize_cpu_report(
             "last": last,
             "omitted": max(0, len(traces) - len(first) - len(last)),
         },
+        "failure_trace_samples": failure_trace_samples,
         "cpu_capability": capability,
         "test_suites": suites,
         "omitted_suites": omitted_suites,

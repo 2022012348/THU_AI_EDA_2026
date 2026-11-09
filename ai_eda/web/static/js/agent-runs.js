@@ -399,7 +399,11 @@ async function runAgent(resumeFrom = null) {
         max_repair_attempts: Number($("#agent-max-repair-attempts")?.value || 8),
         reasoning_effort: $("#agent-reasoning-effort").value,
         planner_skill: Boolean($("#agent-planner-skill")?.checked),
+        use_l1_reference: Boolean($("#agent-l1-reference")?.checked),
         resume_from: resumeId,
+        resume_tester_attempt: resumeId && $("#agent-resume-tester-attempt")?.value
+          ? Number($("#agent-resume-tester-attempt").value) : null,
+        resume_retest_checkpoint: Boolean(resumeId && $("#agent-resume-tester-attempt")?.value && $("#agent-resume-retest")?.checked),
         project_id: state.agent.projectId || "stream_filter",
       }),
     });

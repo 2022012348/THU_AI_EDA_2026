@@ -7,13 +7,19 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from ai_eda.model.client import RTL_SYSTEM_PROMPT, ModelClient
+from ai_eda.model.client import RTL_SYSTEM_PROMPT, EmptyModelResponseError, ModelClient
 from ai_eda.token_metrics import estimate_output_tokens, output_tokens as reported_output_tokens
+
+
+class ModelCallBudgetExceeded(ValueError):
+    """Visible model-call limit, distinct from an invalid model repair."""
 
 
 class RunContext:
@@ -52,6 +58,17 @@ class RunContext:
             options.update({key: value for key, value in overrides.items() if key in model_keys})
         return ModelClient(**options)
 
+    def _record_model_usage(self, event, messages, usage, output, status):
+        record = {'call_index': self.model_calls, 'status': status, 'usage': usage,
+                  'estimated_prompt_tokens': estimate_output_tokens(''.join(m.get('content', '') for m in messages)),
+                  'output_tokens': reported_output_tokens(usage, output),
+                  'usage_source': 'provider' if isinstance(usage, dict) else 'estimate'}
+        event.setdefault('model_call_usage', []).append(record)
+        # Record every format recovery or empty-response retry, not only the
+        # last successful call in a step. Estimates are explicitly labelled.
+        with (self.run_dir / 'model_usage.jsonl').open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(dict(record, node_id=event.get('node_id'), step=event.get('step')), ensure_ascii=False) + '\n')
+
     def call_model(
         self,
         event: dict[str, Any],
@@ -78,49 +95,77 @@ class RunContext:
         model_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """使用已有消息历史做模型调用，支持 Modifier 等子 Agent 的多轮上下文。"""
-        if self.max_calls > 0 and self.model_calls >= self.max_calls:
-            raise ValueError(
-                f"Agent 模型调用次数已达到上限（{self.max_calls} 次），"
-                "请提高调用上限或缩小任务规模。"
-            )
-        self.model_calls += 1
-        event["call_index"] = self.model_calls
         event["conversation_messages"] = len(messages)
         client = self.make_client(model_options)
-        answer_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        usage: dict[str, Any] | None = None
-        finish_reason: str | None = None
         last_emit = 0.0
         last_persist = 0.0
-        event["streaming"] = True
-        event["reasoning"] = ""
-        event["response"] = ""
-        event["output_tokens"] = 0
-        for chunk in client.stream_chat_detail(messages):
+        for attempt in range(ModelClient.EMPTY_CONTENT_RETRIES + 1):
             self.check_cancel()
-            kind = chunk.get("type")
-            if kind == "reasoning":
-                reasoning_parts.append(str(chunk.get("text") or ""))
-            elif kind == "answer":
-                answer_parts.append(str(chunk.get("text") or ""))
-            elif kind == "done":
-                answer_parts = [str(chunk.get("answer") or "")]
-                reasoning_parts = [str(chunk.get("reasoning") or "")]
-                usage = chunk.get("usage")
-                finish_reason = chunk.get("finish_reason")
-            event["reasoning"] = "".join(reasoning_parts)
-            event["response"] = "".join(answer_parts)
-            event["output_tokens"] = estimate_output_tokens(
-                event["response"] + (event["reasoning"] or "")
-            )
-            now = time.monotonic()
-            if now - last_emit >= 0.12:
-                self.emit(json.loads(json.dumps(event, ensure_ascii=False)))
-                last_emit = now
-            if now - last_persist >= 1.0:
+            if self.max_calls > 0 and self.model_calls >= self.max_calls:
+                raise ModelCallBudgetExceeded(
+                    f"Agent 模型调用次数已达到上限（{self.max_calls} 次），"
+                    "请提高调用上限或缩小任务规模。"
+                )
+            self.model_calls += 1
+            event["call_index"] = self.model_calls
+            answer_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            usage: dict[str, Any] | None = None
+            finish_reason: str | None = None
+            got_done = False
+            event["streaming"] = True
+            event["reasoning"] = ""
+            event["response"] = ""
+            event["output_tokens"] = 0
+            try:
+                for chunk in client.stream_chat_detail(messages):
+                    self.check_cancel()
+                    kind = chunk.get("type")
+                    if kind == "reasoning":
+                        reasoning_parts.append(str(chunk.get("text") or ""))
+                    elif kind == "answer":
+                        answer_parts.append(str(chunk.get("text") or ""))
+                    elif kind == "done":
+                        got_done = True
+                        answer_parts = [str(chunk.get("answer") or "")]
+                        reasoning_parts = [str(chunk.get("reasoning") or "")]
+                        usage = chunk.get("usage")
+                        finish_reason = chunk.get("finish_reason")
+                    event["reasoning"] = "".join(reasoning_parts)
+                    event["response"] = "".join(answer_parts)
+                    event["output_tokens"] = estimate_output_tokens(
+                        event["response"] + (event["reasoning"] or "")
+                    )
+                    now = time.monotonic()
+                    if now - last_emit >= 0.12:
+                        self.emit(json.loads(json.dumps(event, ensure_ascii=False)))
+                        last_emit = now
+                    if now - last_persist >= 1.0:
+                        self.persist()
+                        last_persist = now
+            except EmptyModelResponseError as error:
+                self._record_model_usage(event, messages, error.usage,
+                    ''.join(answer_parts + reasoning_parts), 'empty_response')
+                if error.finish_reason == "length" or attempt >= ModelClient.EMPTY_CONTENT_RETRIES:
+                    raise
+                event.setdefault("empty_response_retries", []).append({
+                    "call_index": self.model_calls, "error": str(error),
+                })
+                # Some gateways stop after a long reasoning-only response. A
+                # retry with identical settings can repeat the same failure;
+                # request a direct answer while keeping the messages intact.
+                if getattr(client, "thinking", False) and reasoning_parts:
+                    retry_options = dict(model_options or {})
+                    retry_options["thinking"] = False
+                    client = self.make_client(retry_options)
+                    event["empty_response_retries"][-1]["retry_thinking"] = False
                 self.persist()
-                last_persist = now
+                continue
+            if not got_done:
+                raise RuntimeError("模型流式响应没有正常结束。")
+            self._record_model_usage(event, messages, usage, ''.join(answer_parts + reasoning_parts),
+                                     'truncated' if finish_reason == 'length' else 'completed')
+            break
         self.check_cancel()
         answer = "".join(answer_parts)
         reasoning = "".join(reasoning_parts) or None
@@ -133,20 +178,34 @@ class RunContext:
         artifact_dir = self.run_dir / f"step-{event['step']:02d}-{event['node_id']}"
         artifact_dir.mkdir(exist_ok=True)
         prompt_for_artifact = artifact_prompt or str(messages[-1].get("content") or "")
-        (artifact_dir / "prompt.md").write_text(prompt_for_artifact, encoding="utf-8")
-        (artifact_dir / "conversation.json").write_text(
-            json.dumps(messages, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        (artifact_dir / "raw_response.txt").write_text(answer, encoding="utf-8")
-        if reasoning:
-            (artifact_dir / "reasoning.txt").write_text(reasoning, encoding="utf-8")
+        # Keep the traditional latest files for existing UI readers, plus one
+        # immutable record per completed model call within this step. Modifier
+        # may make several format-recovery calls in a single event.
+        call_dir = artifact_dir / f"call-{self.model_calls:04d}"
+        call_dir.mkdir(exist_ok=False)
+        for directory in (artifact_dir, call_dir):
+            (directory / "prompt.md").write_text(prompt_for_artifact, encoding="utf-8")
+            (directory / "conversation.json").write_text(
+                json.dumps(messages, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            (directory / "raw_response.txt").write_text(answer, encoding="utf-8")
+            if reasoning:
+                (directory / "reasoning.txt").write_text(reasoning, encoding="utf-8")
+            elif directory == artifact_dir and (directory / "reasoning.txt").exists():
+                (directory / "reasoning.txt").unlink()
         event["response"] = answer
         event["raw_response"] = answer
         event["reasoning"] = reasoning
         event["usage"] = usage
         event["output_tokens"] = reported_output_tokens(usage, answer + (reasoning or ""))
         event["streaming"] = False
+        event["finish_reason"] = finish_reason
+        if finish_reason == "length":
+            raise RuntimeError(
+                "模型输出被截断（finish_reason=length）；已保存部分回答，"
+                "不能作为完整 RTL 或 JSON 使用。请提高 max_tokens 或缩短上下文。"
+            )
         return result
 
     def mark_waiting(self, event: dict[str, Any], request: dict[str, Any]) -> None:
@@ -180,6 +239,43 @@ class RunContext:
 
     def write_json_artifact(self, name: str, payload: Any) -> str:
         return self.write_text_artifact(name, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+    def snapshot_rtl_manifest(self, files: dict[str, str], snapshot_id: str) -> dict[str, Any]:
+        """Freeze one complete RTL version and return a compatible manifest.
+
+        Project files remain editable during repair. Handoffs instead point to
+        files here so an earlier Tester input is not silently changed later.
+        """
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", snapshot_id or ""):
+            raise ValueError("RTL 快照名称无效")
+        if not isinstance(files, dict) or not files:
+            raise ValueError("RTL 快照必须包含文件")
+        normalized: set[str] = set()
+        for relative, content in files.items():
+            if not isinstance(relative, str) or not isinstance(content, str):
+                raise ValueError("RTL 快照文件格式无效")
+            path = Path(relative)
+            if path.is_absolute() or "\\" in relative or any(p in {".", ".."} for p in relative.split("/")):
+                raise ValueError(f"RTL 快照路径无效：{relative}")
+            if not relative.endswith(".sv") or path.as_posix() in normalized:
+                raise ValueError(f"RTL 快照路径无效或重复：{relative}")
+            normalized.add(path.as_posix())
+        snapshot_root = self.artifacts_dir / "rtl_snapshots" / snapshot_id
+        snapshot_root.mkdir(parents=True, exist_ok=False)
+        entries = []
+        for relative, content in files.items():
+            target = self._resolve_ref(relative, directory=snapshot_root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            encoded = content.encode("utf-8")
+            with target.open("xb") as output:
+                output.write(encoded)
+            entries.append({
+                "path": relative,
+                "artifact": self.artifact_ref(target),
+                "bytes": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            })
+        return {"files": entries}
 
     def read_text_artifact(self, reference: str) -> str:
         path = self._resolve_ref(reference)

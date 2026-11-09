@@ -397,11 +397,19 @@
         <label class="field-label inline">Max calls <input id="agent-max-calls" type="number" min="1" max="1000" step="1" value="100" /></label>
         <label class="field-label inline">Max repairs <input id="agent-max-repair-attempts" type="number" min="1" max="10" step="1" value="8" /></label>
         <p class="field-hint">Default: up to 8 Modifier repair rounds; Tester runs after each repair.</p>
+        <label class="field-label inline">Resume Tester round <input id="agent-resume-tester-attempt" type="number" min="1" step="1" placeholder="Latest" /></label>
+        <p class="field-hint">Optional: when resuming, restore this failed Tester round's immutable snapshot. Leave blank to resume the latest failure.</p>
+        <label class="switch-label"><input id="agent-resume-retest" type="checkbox" /><span class="switch"></span>Retest selected snapshot before repair</label>
         <label class="switch-label planner-skill-option" title="Available for the synchronous FIFO project only">
           <input id="agent-planner-skill" type="checkbox" />
           <span class="switch"></span>Planner Skill: FIFO Area/Power Pre-Evaluation
         </label>
         <p id="agent-planner-skill-hint" class="field-hint">Runs a Python estimator before planning and selects smaller-area FIFO architecture parameters.</p>
+        <label class="switch-label" title="Used only for the RV32I L1 project">
+          <input id="agent-l1-reference" type="checkbox" checked />
+          <span class="switch"></span>L1: use reference RTL
+        </label>
+        <p class="field-hint">When enabled, L1 uses the complete reference design. Turn off to generate every module with the model.</p>
         <label class="field-label inline">Reasoning
           <select id="agent-reasoning-effort"><option value="low" selected>low</option><option value="high">high</option><option value="max">max</option></select>
         </label>

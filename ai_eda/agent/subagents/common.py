@@ -35,52 +35,24 @@ Return ONLY a JSON object:
 {"project_name": "...", "top_module": "...", "modules": [{"name": "module_name", "file": "rtl/module_name.sv", "description": "short responsibility", "interfaces": "complete port contract: every port name, direction and width; for each inter-module signal use the same name/width in all modules"}], "notes": "..."}
 Use only relative paths ending in .sv. Every module must be implementable in one file. The interfaces field is the interface contract: list every port name, direction and width, and use identical names/widths for a signal in every module. Do not return Markdown fences or extra text."""
 
-RV32I_L1_CODE_PATTERNS = """RV32I L1 tactical patterns (use these structures; keep interfaces from the plan):
-1) IF response / stall:
-  always_ff @(posedge clk) begin
-    if (!rst_n) ...
-    else if (redirect_valid) ...
-    else if (ecall_in_id && !halt_pending && !mem_stall) begin
-      halt_pending <= 1'b1; req_pending <= 1'b0; end
-    else if (cpu_resp_valid) begin
-      if2id_valid<=1; if2id_pc<=pc; if2id_pc4<=pc+4; if2id_insn<=cpu_resp_data;
-      pc<=pc+4; req_pending<=1; end
-    else if (stall) begin if2id_valid<=if2id_valid; end
-    else begin if (req_pending && cpu_req_ready) begin req_pending<=0; if2id_valid<=0; end end
-  end
-  Never put a stall branch before the one-cycle cpu_resp_valid branch, and never clear if2id_valid on stall.
-2) MEM response:
-  if (mem_active) begin
-    if (cpu_resp_valid) begin mem2wb_valid<=1; ...; mem_active<=0; mem_wait_resp<=0; end
-    else if (!mem_wait_resp && cpu_req_ready) mem_wait_resp<=1;
-  end
-3) DCache word/store:
-  assign hit_word = line_data[{wsel,5'b00000} +: 32];
-  // store hit: merge only enabled bytes into the selected word, then write back
-  // store miss: do not claim a valid line with stale data; either merge the refilled word
-  // or invalidate the line and refill on the next load.
-4) ICache refill:
-  // do not return state to IDLE on flush. Keep mem_req_valid/addr stable until mem_req_ready.
-  // On the last word always install valid/tag/data; gate only resp_valid_r/resp_data_r
-  // with flush_epoch==refill_epoch. For refill_word==3 use the current mem_resp_data.
-5) EX forwarding:
-  rs1_fwd = id2ex_rs1_val;
-  if (fwd_a==2'b10) rs1_fwd = ex2mem_result;       // EX/MEM ALU result
-  else if (fwd_a==2'b01) rs1_fwd = mem2wb_wdata;   // MEM/WB result
-  // same for rs2; ex2mem_result for JAL/JALR must be pc4, not the address ALU output.
-6) Halt: only WB sees mem2wb_valid && mem2wb_is_ecall and sets halted/exit_code; preserve is_ecall through stall.
+RV32I_L1_CODE_PATTERNS = """RV32I design review guidance (the frozen Spec and the plan's explicit interfaces/encodings take precedence):
+- Preserve accepted one-cycle cache/bus responses across downstream stalls. If a response arrives when a pipeline register cannot advance, buffer it or apply an equivalent protocol-safe mechanism; do not overwrite a held valid instruction.
+- For the L1 external bus specified in A.1, read data is sampled on the clock edge where valid && ready. If top-level wiring says mem_resp_valid = mem_req_valid && mem_req_ready, both indicate that SAME accepting edge; a combinational high before the edge does not by itself mean a previous-word response. Derive timing from the actual producer/consumer RTL; do not invent a delayed response.
+- Track each accepted IF-to-I-cache request until its single response is consumed or invalidated. Do not issue another fetch for the same PC merely because the request-valid bit cleared at acceptance; bind response data to the accepted request's PC, including stalls and redirects.
+- Distinguish a load-use interlock (hold the dependent instruction and insert a bubble into EX while the older load progresses) from a downstream memory/structural stall (hold valid older instructions until they can advance). Apply reset and redirect priorities from the Spec.
+- Forward from the youngest eligible older producer; an EX/MEM load cannot forward its address as load data. Follow the plan's encoding for forwarding selectors. JAL/JALR link results forward PC+4.
+- For a 128-bit line, word wsel begins at bit wsel*32. For Icarus compatibility, read an unpacked array element into an intermediate 128-bit vector before selecting its word; avoid a dynamic part-select directly on a variable-indexed array element. Preserve byte offsets, little-endian lane selection, sign/zero extension and write byte enables.
+- When the Spec requires write-allocate, a store miss refills the target line, merges the store bytes and performs exactly one write-through; acknowledge and retire only after external acceptance.
+- Handle reset, redirects and ECALL without revoking an already asserted unaccepted external request except when the Spec explicitly permits it. When the Spec requires wrong-path or stale-epoch refills to be discarded, do not install the line or deliver its response. Use the current response for the final refill word.
+- On an I-cache cold miss, trace the accepted request's saved word offset through refill and response: requested words 0/1/2/3 must return the corresponding address's data. In a nonblocking-assignment refill, the buffer element for the final beat still contains its old value on that edge; if responding on that edge, the final word must come from the current accepted bus data. Treat this as a hypothesis to verify against the current RTL, not as an assumed failure.
+- Trace ECALL valid and the associated PC/instruction through ID, EX, MEM and retirement. If a hazard or halt-pending freezes ID, check whether the same-cycle stall/flush prevents ECALL from ever entering EX or emits it twice. The accepted ECALL must enter EX exactly once when downstream can accept it; freeze only younger fetches and preserve older operations. This is a hypothesis to verify, not proof that any timeout is an ECALL bug.
 """
 
-RV32I_PIPELINE_CHECKLIST = """RV32I L1/L2 implementation hard checks:
-- One-cycle response pulses: if a cache/bus producer asserts resp_valid for one cycle, the consumer must capture resp_valid unconditionally before checking a wait/ready flag; never rely on a wait flag that is set only on the following cycle.
-- Stall/freeze: while load_use_stall, mem_stall, or structural stall is active, hold IF/ID valid and ID/EX valid; never clear a valid instruction just because the downstream stage is stalled.
-- ECALL/halt: ECALL must stay valid through ID -> EX -> MEM -> WB while stalls are active; only WB may set halted/exit_code. Do not drop an ECALL that is waiting in IF/ID while ID is frozen.
-- Cache word lanes: for a 128-bit line, word selection is wsel*32 bits, e.g. line_data[{wsel,5'b00000} +: 32], not wsel*4 bit.
-- Store merge: write-through store hit must merge only byte-enable lanes into the line; store miss should either merge the requested word explicitly or invalidate the line (no-write-allocate) so a later load refills correct data.
-- Cache line refill: never abort an already-issued external refill before ready; hold valid/address stable until ready, finish all words, then install valid/tag/data (a redirect may suppress only the response, not destroy the line).
-- I-Cache refill word3: use the current last memory response for word3, not an old/empty refill register.
-- Forwarding: implement BOTH EX/MEM (fwd=2'b10) and MEM/WB (fwd=2'b01) paths; JAL/JALR EX/MEM result must select pc4/pc according to wb_sel, never blindly forward ALU result.
-- Halt/reset: synchronous active-low reset, dmem_valid=0 during reset; halted/exit_code are registered and stable after ECALL commits.
+RV32I_PIPELINE_CHECKLIST = """RV32I cross-module consistency checks:
+- The producer and consumer of every ready/valid interface agree on acceptance, pulse timing, buffering, reset and stall behavior.
+- Pipeline stalls, bubbles and flushes do not duplicate, drop or incorrectly retire instructions; older operations retain architectural priority.
+- Forwarding, load-use hazards, branch/jump targets, store data/byte lanes, and synchronous reset follow the frozen Spec.
+- Where caches are required, check complete refill, store policy, epoch/flush, invalid lines and exactly-once bus requests against the frozen Spec; do not invent an alternative store-miss or wrong-path policy.
 """
 
 MODIFIER_SYSTEM_PROMPT = """You are the RTL Modifier of a digital IC design agent.
@@ -90,16 +62,14 @@ Your job is to diagnose the root cause and modify only the files that need chang
 Rules:
 - Match the Planner interfaces exactly. Never rename ports, modules, files, or parameters.
 - For compile failures, fix every error in stderr, including hierarchy/port/width errors.
+- Toolchain limits of `iverilog -g2012`: distinguish fatal errors from warnings. "sorry: constant selects in always_* processes are not fully supported (all bits will be included)" describes sensitivity-list broadening and alone does not reject compilation; use the compiler return code and actual errors. Enum-typed ternaries can require explicit casts; nested range part-selects must be split into intermediate vectors when rejected.
 - For simulation failures, use the failing checks and trace to find the root cause; do not guess or weaken behavior.
 - Preserve already-correct logic. A small targeted patch is better than rewriting the project.
 - Do not add external IPs, simulation-only constructs, or modify the teacher TB.
 - Keep diagnosis focused: identify the minimal root cause, avoid restating the spec or exploring unneeded alternatives.
-- Build a short failure matrix before editing: failing check -> expected/actual -> affected module(s). Cover every failed check category, not just the first one.
+- Group related failed checks by shared observable failure, and prioritize the earliest causal mismatch. Distinguish direct evidence from hypotheses; do not assume all failures share one root cause. Choose a small repair that can be verified before expanding the scope.
 - If the same check failed in the previous repair round, do not repeat the same patch. Re-read the failing trace and change the data path or state transition that produces the mismatch.
-- RV32I load/store failures: explicitly verify little-endian byte lanes, sign/zero extension, SB/SH byte enables and replicated wdata, cache refill merge, write-through ordering, and load-use forwarding.
-- RV32I reset/control failures: verify synchronous reset gating of dmem_valid, pipeline valid/flush, PC redirection, and halted/exit_code timing.
-- If many tests time out waiting for halted while imem_addr advances, prioritize the ECALL→halt path: ID decode, is_ecall propagation through EX/MEM/WB, WB halted/exit_code commit, IF freeze, and synchronous reset. Do not assume a cache or load/store bug from the timeout alone.
-- Before returning JSON, self-check each failed check from the latest report and state the repair in notes. Do not return files that only address a subset.
+- In notes, identify the observed evidence and the actual changed logic; do not claim that an unexecuted test passed or a hypothesis was proven. Preserve requirements for all tests even if the current patch addresses one root cause.
 - Compare every returned content with the current file snapshot. At least one returned file MUST differ from the snapshot; returning an unchanged file is an invalid no-op patch.
 - If a previous patch did not change behavior, do not repeat it; change the root-cause hypothesis and the implementation strategy.
 - Return ONLY a JSON object; no Markdown fences, no prose outside JSON.
@@ -110,10 +80,14 @@ You may return only files that need changes, but each returned file must contain
 
 """
 
-MODIFIER_SYSTEM_PROMPT += "\n\n" + RV32I_PIPELINE_CHECKLIST + "\n\n" + RV32I_L1_CODE_PATTERNS
+RV32I_MODIFIER_RULES = """- RV32I load/store failures: explicitly verify little-endian byte lanes, sign/zero extension, SB/SH byte enables and replicated wdata, cache refill merge, write-through ordering, and load-use forwarding.
+- RV32I reset/control failures: verify synchronous reset gating of dmem_valid, pipeline valid/flush, PC redirection, and halted/exit_code timing.
+- Retire pc/insn mismatch: before touching stall, cache or refill logic, compare the retired instruction word against the teacher program at pc, pc-4 and pc+4 (the read-only replay reports these as expected_insn, insn_at_pc_minus4 and prev_if). If the retired word matches a neighbouring address, the defect is the pc/instruction pairing carried through the pipeline (which pc value is latched alongside the instruction, and which pc the debug retire port exposes), not the fetch protocol.
+- If many tests time out waiting for halted while imem_addr advances, prioritize the ECALL→halt path: ID decode, is_ecall propagation through EX/MEM/WB, WB halted/exit_code commit, IF freeze, and synchronous reset. Do not assume a cache or load/store bug from the timeout alone.
+- Fetch/response lifetime: the pc recorded with an instruction must be the address that instruction was fetched from, not the following address. Keep one outstanding request bound to the response you consume; do not advance or rebind the request address before that response has been consumed, and do not let a dropped response leave the address bookkeeping ahead of the instruction stream.
+"""
 
 MAX_PARSER_ROUNDS = 3
-MAX_TEST_ATTEMPTS = 9
 SV_PATH_PATTERN = re.compile(r"^[A-Za-z0-9_./-]+\.sv$")
 MODULE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -130,6 +104,18 @@ def extract_json_payload(text: str) -> dict[str, Any]:
             return payload
     except json.JSONDecodeError:
         pass
+    # Some models emit one valid JSON object followed by stray closing
+    # delimiters. Accept only that bounded suffix; never silently accept a
+    # second object or arbitrary trailing content as part of a repair.
+    if raw.startswith("{"):
+        try:
+            payload, end_index = json.JSONDecoder().raw_decode(raw)
+            suffix = raw[end_index:].strip()
+            if (isinstance(payload, dict) and suffix and len(suffix) <= 16
+                    and all(char in "]}" for char in suffix)):
+                return payload
+        except json.JSONDecodeError:
+            pass
     start = raw.find("{")
     end = raw.rfind("}")
     if start >= 0 and end > start:
@@ -184,8 +170,8 @@ def validate_plan(payload: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": name,
                 "file": file,
-                "description": str(item.get("description") or "")[:500],
-                "interfaces": str(item.get("interfaces") or "")[:1000],
+                "description": str(item.get("description") or ""),
+                "interfaces": str(item.get("interfaces") or ""),
             }
         )
     top_module = payload.get("top_module") or clean_modules[0]["name"]
@@ -195,7 +181,7 @@ def validate_plan(payload: dict[str, Any]) -> dict[str, Any]:
         "project_name": str(payload.get("project_name") or "agent_project")[:100],
         "top_module": top_module,
         "modules": clean_modules,
-        "notes": str(payload.get("notes") or "")[:2000],
+        "notes": str(payload.get("notes") or ""),
     }
 
 
@@ -224,14 +210,29 @@ def combine_files(files: dict[str, str]) -> str:
 
 
 def trace_mismatches(report: dict[str, Any]) -> list[str]:
+    # A trace expected_* field can describe a reference calculation, not a TB
+    # assertion (e.g. DFT magnitudes). Only surface evidence from failed tests.
+    failed_tests = {
+        str(item.get("testcase") or item.get("test") or item.get("name") or "")
+        for item in report.get("checks") or [] if isinstance(item, dict)
+    } - {""}
     messages: list[str] = []
     for row in report.get("trace") or []:
+        if not isinstance(row, dict):
+            continue
+        test = str(row.get("test") or row.get("testcase") or "")
+        if test and test not in failed_tests:
+            continue
         differences = []
         for key, value in row.items():
             if not key.startswith("expected_"):
                 continue
+            if not test and not any(k in row for k in (f"actual_{key[9:]}", f"out_{key[9:]}")):
+                continue
             actual_key = key.removeprefix("expected_")
-            actual = row.get(actual_key)
+            actual = row.get(f"actual_{actual_key}")
+            if actual is None:
+                actual = row.get(actual_key)
             if actual is None:
                 actual = row.get(f"out_{actual_key}")
             if actual is not None and str(actual) != str(value):
@@ -242,12 +243,70 @@ def trace_mismatches(report: dict[str, Any]) -> list[str]:
     return messages[:12]
 
 
+def _retire_pairing_summary(observation: dict[str, Any]) -> str:
+    """机械统计：退休的指令字与 pc / pc-4 处程序内容的重合次数。"""
+    items = [item for item in (observation.get('observations') or []) if isinstance(item, dict)]
+    if not items:
+        return ""
+    def same(item: dict[str, Any], key: str) -> bool:
+        value = item.get(key)
+        return isinstance(value, str) and bool(value) and value.lower() == str(item.get('insn') or '').lower()
+    at_pc = sum(same(item, 'expected_insn') for item in items)
+    at_minus4 = sum(same(item, 'insn_at_pc_minus4') for item in items)
+    return (
+        f"Retire pairing summary (counts computed from the read-only replay, not an acceptance result): "
+        f"{len(items)} mismatches; retired word equals the program word at pc in {at_pc} and at pc-4 in {at_minus4}."
+    )
+
+
 def report_feedback(report: dict[str, Any] | None) -> str:
     if report is None:
         return "Verification has not run for the previous round."
     if report.get("passed"):
         return "The previous teacher TB passed; preserve current behavior and finish the remaining steps."
     lines = [report_summary(report)]
+    if isinstance(report.get('repair_ticket'),dict):
+        lines.append('This round has ONE repair ticket. Explain this counterexample; unrelated symptoms are deferred. '
+                     'Request a probe if needed. Return its exact ticket_id with your edits:\n'
+                     + json.dumps(report['repair_ticket'],ensure_ascii=False))
+        if report['repair_ticket'].get('pipeline_token_presence'):
+            lines.append('Use the retained pipeline history to locate the last stage where the expected PC-tag was actually valid and examine its transfer into the next stage, including stall/flush and request ownership. Stage presence is bounded observation, not proof of which module is faulty.')
+    bus = report.get('data_bus_observation')
+    if isinstance(bus, dict):
+        failing = {str(c.get('name')) for c in report.get('checks', []) if isinstance(c, dict)}
+        selected = [row for row in bus.get('tests', []) if row.get('test') in failing][:6]
+        lines.append('Read-only data bus evidence: ' + json.dumps(
+            {'status': bus.get('status'), 'scope': bus.get('scope'), 'tests': selected}, ensure_ascii=False))
+    if isinstance(report.get('retirement_observation'), dict):
+        lines.append('Read-only retirement replay evidence: ' + json.dumps(report['retirement_observation'], ensure_ascii=False))
+        pairing = _retire_pairing_summary(report['retirement_observation'])
+        if pairing:
+            lines.append(pairing)
+    tail = report.get('retire_tail')
+    if isinstance(tail, dict) and tail.get('status') == 'observed':
+        summary = tail.get('summary') or {}
+        lines.append(
+            'Read-only retire tail at end of simulation: '
+            f"total_retirements={summary.get('total')} halted={summary.get('halted')} "
+            f"exit_code={summary.get('exit')} last_test={summary.get('test')}. "
+            'Repeated adjacent PCs may be legitimate loops; compare instruction semantics and side effects before diagnosing duplicate execution. '
+            f"Recent pc sequence: {str(tail.get('loop') or '')[:600]}"
+        )
+    for probe in (report.get('directed_checks') or [])[:6]:
+        if isinstance(probe, dict):
+            lines.append('Automatic directed evidence: ' + json.dumps({
+                'name': probe.get('name'), 'status': probe.get('status'),
+                'detail': probe.get('detail'), 'observations': probe.get('observations') or []}, ensure_ascii=False))
+    structural = report.get('structural_diagnostics')
+    if isinstance(structural, dict) and structural.get('issues'):
+        lines.append('Yosys static structural evidence (not a behavioral root-cause verdict):')
+        lines.extend('- ' + str(issue) for issue in structural['issues'][:16])
+    if report.get('teacher_passed') is False and report.get('directed_checks'):
+        lines.append(
+            'Evidence scope: the original teacher TB still fails. Independent directed probes test specific boundaries; '
+            'do not infer that a probe failure explains unrelated arithmetic, forwarding or retirement errors. '
+            'Find the earliest architectural mismatch in the teacher trace and trace the actual producing signals; '
+            'track directed-probe failures separately. Do not simply choose the first listed check as the root cause.')
     mismatches = trace_mismatches(report)
     if mismatches:
         lines.append("Failing cycles:")
@@ -259,34 +318,91 @@ def report_feedback(report: dict[str, Any] | None) -> str:
     if suites:
         lines.append("Failing suites: " + ", ".join(suites))
     checks = report.get("checks") or []
+    if report.get('partial_output'):
+        lines.append('Partial simulation output: trace is sampled and repeated failures are counted; the suite did not finish. '
+                     + json.dumps(report.get('diagnostic_counts') or {}, ensure_ascii=False))
+    elif report.get('diagnostic_counts'):
+        lines.append('Completed simulation: trace samples and grouped failure counts; full output is retained separately. '
+                     + json.dumps(report['diagnostic_counts'], ensure_ascii=False))
     if checks:
-        lines.append("Failed checks:")
-        lines.extend(f"- {item.get('name')}: {item.get('detail', '')}".rstrip(": ") for item in checks[:20])
-        if len(checks) > 20:
-            lines.append(f"- ... {len(checks) - 20} additional failed checks omitted")
+        # Repeated assertions in one testcase can otherwise crowd every other
+        # failure out of the prompt. Count identical records and show one item
+        # per testcase first, then additional distinct details within the cap.
+        groups: dict[str, dict[str, int]] = {}
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "check")
+            detail = str(item.get("detail") or "")
+            details = groups.setdefault(name, {})
+            count = item.get('count', 1)
+            count = count if type(count) is int and count > 0 else 1
+            details[detail] = details.get(detail, 0) + count
+        lines.append("Failed checks (grouped; repeated occurrences counted):")
+        selected: list[tuple[str, str, int]] = []
+        per_test = {name: list(details.items()) for name, details in groups.items()}
+        for name, details in per_test.items():
+            if len(selected) >= 20:
+                break
+            detail, count = details[0]
+            selected.append((name, detail, count))
+        # Reserve room for another distinct symptom (e.g. halt timeout after
+        # an earlier retire mismatch) even when many tests failed.
+        if len(per_test) > 18:
+            selected = selected[:18]
+        for name, details in per_test.items():
+            for detail, count in details[1:]:
+                if len(selected) >= 20:
+                    break
+                selected.append((name, detail, count))
+            if len(selected) >= 20:
+                break
+        for name, detail, count in selected:
+            suffix = f" (×{count})" if count > 1 else ""
+            lines.append(f"- {name}: {detail}{suffix}".rstrip(": "))
+        shown = sum(count for _, _, count in selected)
+        total_occurrences = sum(sum(details.values()) for details in groups.values())
+        if total_occurrences > shown:
+            lines.append(f"- ... {total_occurrences - shown} additional occurrences omitted; see full report")
         timeout_count = sum("等待 halted 超时" in str(item.get("detail") or "") for item in checks)
-        if timeout_count >= 2:
+        has_retire_mismatch = any(
+            "retire PC/instruction does not match" in str(item.get("detail") or "")
+            for item in checks if isinstance(item, dict)
+        )
+        if (report.get("stage") == "simulation" and timeout_count >= 2
+                and (timeout_count * 2 > len(checks) or has_retire_mismatch)):
             lines.append(
-                "HALT-TIMEOUT 诊断提示：多个测试都等到 halted 超时，且 imem_addr 仍在变化；"
-                "请优先检查 ECALL 在 ID 级的识别、ID→EX→MEM→WB 的 is_ecall 传递、"
-                "WB 的 halted/exit_code 更新、IF/流水线 halt 冻结，以及同步复位；"
-                "不要只修 Cache 或单个数据通路。"
+                "HALT-TIMEOUT：多个测试等待 halted 超时；这不能单独确定根因。"
+                "结合各失败测试 trace 检查 resp_valid 捕获、stall/valid、ECALL 到 WB 的传递与提交；"
+                "同时排查前递、访存握手和控制重定向，不要仅凭超时断定 halt 或 Cache 有错。"
+                "逐拍核对：refill 后返回的是原请求的 word offset（不是总返回最后一字）；"
+                "无更老指令重定向且下游可接收时，检查 ID stall/flush 是否误清 ECALL，能否使其进入 EX 一次。"
             )
     if report.get("stage") == "simulation" and checks:
         joined = "\n".join(f"{item.get('name')}: {item.get('detail', '')}" for item in checks)
-        if "等待 halted 超时" in joined:
+        if "retire PC/instruction does not match" in joined:
             lines.append(
-                "HALT-TIMEOUT: 先检查单拍 resp_valid 是否被 wait 标志漏采、stall 时 IF/ID/ID-EX valid 是否被清、"
-                "以及 ECALL 是否在 ID 冻结时被丢弃；不要先只改 Cache 数据通路。"
+                "FETCH/RETIRE 诊断候选：逐拍对照已接受取指的 PC、原始指令、ICache cold miss 的请求字偏移与退休值；"
+                "分别检查四种 word offset、最后一字的非阻塞赋值，以及重复请求/响应绑定。"
+                "若同时存在 halt 超时，也要独立核对 ECALL 是否能从 ID 进入 EX；这些是待验证的假设。"
             )
         if "cache_instruction_reuse" in joined or "imem 请求" in joined or "I-memory request changed" in joined:
             lines.append(
-                "ICACHE/REFILL: refill 期间 imem_valid/addr 必须保持到 imem_ready；不要 abort 在途 refill；"
-                "完成后安装 line，仅用 epoch 抑制过期 response。"
+                "ICACHE/REFILL: 对已发出的请求检查 valid/addr 与 ready 握手；重定向或 epoch 失效时，"
+                "按 Spec 处理在途事务并丢弃错误路径响应，勿将无效 refill 安装为有效行。"
             )
     if report.get("stage") == "compile":
         detail = (report.get("stderr") or report.get("stdout") or "").strip()
         if detail:
+            # Icarus emits many nonfatal "sorry" warnings; the actual error may
+            # occur far above the tail. Preserve it separately for the Modifier.
+            errors = [line for line in detail.splitlines()
+                      if re.search(r"\b(?:error|fatal)\s*:", line, re.IGNORECASE)]
+            if errors:
+                lines.append("Compiler errors (first 30):")
+                lines.extend(errors[:30])
+                if len(errors) > 30:
+                    lines.append(f"... {len(errors) - 30} additional errors omitted")
             lines.append("Compiler output (tail):")
             lines.append(detail[-3000:])
     return "\n".join(lines)

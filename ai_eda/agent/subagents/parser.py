@@ -51,7 +51,8 @@ class ParserAgent(SubAgent):
                 "已有 Parser 补充/修正：\n"
                 f"{addendum or '（无）'}\n\n"
                 "请判断是否充分；只返回补充/修正，不要重写或缩短原 Spec。"
-                "请只返回约定的 JSON 对象。"
+                '请只返回 JSON 对象，字段必须为：{"sufficient": true 或 false, '
+                '"missing": [], "questions": [], "spec_addendum": "补充文本"}。'
             )
             event = self.runtime.begin_event("parser", self.node_type, self.title, prompt, rounds)
             result = self.runtime.call_model(event, prompt, PARSER_SYSTEM_PROMPT)
@@ -60,10 +61,13 @@ class ParserAgent(SubAgent):
             except ValueError as error:
                 raise ValueError(f"Parser 返回格式无效：{error}") from error
             missing = [str(item)[:500] for item in (parsed.get("missing") or []) if str(item).strip()]
-            questions = [str(item)[:500] for item in (parsed.get("questions") or []) if str(item).strip()]
-            sufficient = parsed.get("sufficient") is True and not missing and not questions
+            questions = [str(item)[:500] for item in (parsed.get("questions") or parsed.get("blocking_questions") or []) if str(item).strip()]
+            verdict = parsed.get("verdict")
+            sufficient = (parsed.get("sufficient") is True or ("sufficient" not in parsed and verdict in {"sufficient", "sufficient_after_addendum"})) and not missing and not questions
             # 兼容旧输出：refined_spec 只作为补充内容，不再替换原 Spec。
             addendum_value = parsed.get("spec_addendum")
+            if isinstance(addendum_value, list):
+                addendum_value = "\n".join(f"- {item}" for item in addendum_value if isinstance(item, str) and item.strip())
             if not isinstance(addendum_value, str) or not addendum_value.strip():
                 legacy = parsed.get("refined_spec")
                 addendum_value = legacy if isinstance(legacy, str) else ""

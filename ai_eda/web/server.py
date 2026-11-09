@@ -238,6 +238,9 @@ def _agent_options(request: dict[str, Any]) -> dict[str, Any]:
     if not 1 <= max_repair_attempts <= 10:
         raise ValueError("max_repair_attempts 必须在 1 到 10 之间")
     planner_skill = bool(request.get("planner_skill", False))
+    use_l1_reference = request.get("use_l1_reference", True)
+    if not isinstance(use_l1_reference, bool):
+        raise ValueError("use_l1_reference 必须是布尔值")
     resume_from = request.get("resume_from")
     if resume_from in (None, ""):
         resume_from = None
@@ -245,6 +248,13 @@ def _agent_options(request: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("resume_from 必须是运行 ID")
     else:
         resume_from = _run_component(resume_from, "resume_from")
+    resume_tester_attempt = request.get("resume_tester_attempt")
+    if resume_tester_attempt is not None:
+        if type(resume_tester_attempt) is not int or resume_tester_attempt < 1 or not resume_from:
+            raise ValueError("resume_tester_attempt 必须与运行 ID 一起提供，且为正整数")
+    resume_retest_checkpoint = request.get("resume_retest_checkpoint", False)
+    if not isinstance(resume_retest_checkpoint, bool) or (resume_retest_checkpoint and resume_tester_attempt is None):
+        raise ValueError("重新测试历史快照需要指定 Tester 轮次")
     design_id = request.get("design_id")
     if design_id in (None, ""):
         design_id = None
@@ -266,7 +276,10 @@ def _agent_options(request: dict[str, Any]) -> dict[str, Any]:
         "max_calls": max_calls,
         "max_repair_attempts": max_repair_attempts,
         "planner_skill": planner_skill,
+        "use_l1_reference": use_l1_reference,
         "resume_from": resume_from,
+        "resume_tester_attempt": resume_tester_attempt,
+        "resume_retest_checkpoint": resume_retest_checkpoint,
         "design_id": design_id,
         "design_name": design_name,
         "project_id": project_id,

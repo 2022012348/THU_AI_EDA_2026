@@ -218,3 +218,35 @@ t11_halt     : x10 期望 0x000000ab 得到 0x00000000  （exit_code 未锁存�
 - **目前最好且可复现的快照仍是 40 条**：`agent-20261028T120731264745-e823d5bd43ba4f6e9c373e38f5fa9b16`（tester-03）。
   如果要继续，建议从它续跑，而不是从 71 条那份。
 - 未提交改动现为 **44 个文件**（比交接时多 10 个），依旧**不要 reset/checkout**。
+
+### 2026-11-09 补充（零成本，未花钱跑模型）
+
+- **发现重复劳动**：Codex 交接后已经写了 `agent/skills/data_bus_observer.py`（按 test 分组、含 cycle/we/addr/rdata）与 `signal_probe.py`，覆盖了 D 通路证据。我一度新写的 `dmem_trace.py` 与之重复，**已删除并还原 tester.py**。后续别再重复造这个轮子。
+- **实测这份证据本身是有效的**：同一份 40 条快照上，D 总线 `total=134944 / stores=43 / loads=134901`；`cache_line_conflict` 与 `bench_crc32` 的 `等待周期=16` 且报 `D-memory request changed before ready`（违反 A.1 的"地址必须保持到 ready"）。
+- **改了一处提示词结构**（免费）：`modifier.py::_failure_digest` 现在把每个测试的 D 总线计数**直接贴在对应失败行后面**，例如
+  `- t06_load_store x21 — x2 期望 0x80ff7f01 得到 0x00000000 ［D 总线：读=8 写=4 退休load=18 退休store=3］`。
+  原因是 `data_bus_observation` 在反馈里是一大段 JSON，连续多轮都没被模型用上。
+- 离线回归：**104 项通过**（未跑任何付费模型调用）。
+
+### 2026-11-09 第二轮补充（仍然零成本）
+
+- `_failure_digest` 的 D 总线注解扩到 7 个字段，新增 **`退休总数`** 与 **`相邻重复退休`**（后者直接对应"一条指令退休两次"）。
+  真实报告上现在长这样：
+  ```
+  - t08_store_fwd x10 — x6 期望 0xffffffff 得到 0x000007ab ［D 总线：读=8 写=4 退休load=5 退休store=2 退休总数=17 相邻重复退休=3 等待周期=0］
+  - cache_line_conflict x13 — D-memory request changed before ready ［… 等待周期=16］
+  - t11_halt x5 — 执行 3344 周期超过预算 72 ［… 退休总数=1023］
+  ```
+- 新增 `checks/test_failure_digest.py`（5 条），全量离线回归 **109 项通过**。
+- 仍未发起任何付费模型调用。
+
+### 2026-11-09 第三轮补充（零成本）
+
+- **确定性复核**：同一份 40 条快照连跑两次 `test_rtl`，17.4 s / 17.3 s，**两次 check 集合完全一致**（39 条，差异只是探针检查不在原始 test_rtl 里）。可以确认 120 s 之后测量是可复现的。
+- **新增验收脚本** `scripts/run_l1_stability.py`：连续 K 次**全新独立**运行（无 resume、`use_l1_reference=False`、无 diagnostic_evidence），输出汇总表 + JSON 记录，失败可 `--stop-on-fail`。
+  **默认只打印计划，必须加 `--yes` 才花钱**：
+  ```sh
+  .venv/bin/python scripts/run_l1_stability.py            # 预览
+  .venv/bin/python scripts/run_l1_stability.py --yes      # 跑 3 次 = 任务的"稳定通过"定义
+  ```
+  这就是最终验收要用的那条命令，别再用零散的手工 run_agent 声称"稳定"。

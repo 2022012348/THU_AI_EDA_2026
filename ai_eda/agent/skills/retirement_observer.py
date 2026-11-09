@@ -13,6 +13,7 @@ from ai_eda.rtl.runner import _cpu_feature_compile_flags
 from ai_eda.agent.skills.pipeline_history import add_pipeline_history, token_presence
 
 MARKER = 'AI_EDA_RETIRE_OBSERVATION|'
+HEAD_MARKER = 'AI_EDA_RETIRE_HEAD|'
 OBSERVER = '''`timescale 1ns/1ps
 module agent_retirement_observer;
   // PIPELINE_HISTORY_DECL
@@ -22,6 +23,11 @@ module agent_retirement_observer;
   reg previous_valid = 0;
   reg [31:0] previous_pc, previous_insn;
   string previous_test = "";
+  // First retirements after each reset / test switch. The mismatch report alone
+  // cannot show a run that starts at a wrong PC (e.g. a stale fetch response
+  // retired before the first real instruction), so the head is always recorded.
+  integer head_count = 0;
+  string head_test = "";
   // In this no-interrupt RV32I contract, a retired non-control instruction
   // must be followed by pc+4. Branch/JAL/JALR/system instructions are excluded:
   // adjacent equal PCs alone are not evidence of duplicate execution.
@@ -34,7 +40,20 @@ module agent_retirement_observer;
       // PIPELINE_HISTORY_RESET
     end
     previous_test = tb_agent_rv32i5.u_teacher_tb.cur_test;
+    if (head_test != tb_agent_rv32i5.u_teacher_tb.cur_test ||
+        !tb_agent_rv32i5.u_teacher_tb.rst_n)
+    begin
+      head_test = tb_agent_rv32i5.u_teacher_tb.cur_test;
+      head_count = 0;
+    end
     // PIPELINE_HISTORY_SAMPLE
+    if (tb_agent_rv32i5.u_teacher_tb.rst_n && tb_agent_rv32i5.u_teacher_tb.dbg_retire_valid &&
+        head_count < 8) begin
+      head_count = head_count + 1;
+      $display("AI_EDA_RETIRE_HEAD|test=%s|n=%0d|pc=%h|insn=%h",
+        tb_agent_rv32i5.u_teacher_tb.cur_test, head_count,
+        tb_agent_rv32i5.u_teacher_tb.dbg_retire_pc, tb_agent_rv32i5.u_teacher_tb.dbg_retire_insn);
+    end
     if (tb_agent_rv32i5.u_teacher_tb.rst_n && tb_agent_rv32i5.u_teacher_tb.dbg_retire_valid) begin
       case (previous_insn[6:0])
         7'h03,7'h13,7'h17,7'h23,7'h33,7'h37: begin
@@ -114,7 +133,8 @@ def observe_retirement(*, project: dict, combined_path: Path, output_dir: Path) 
     observer.write_text(observer_source, encoding='utf-8')
     teacher = Path(project['testbench_path'])
     result = {'status': 'not_observed', 'observations': [], 'sequence_observations': [], 'pipeline_history': [],
-              'scope': 'Separate read-only replay: at most five PC/word mismatches or fallthrough sequence violations. For retired load/store/ALU/LUI/AUIPC in this no-interrupt ISA, the next retired PC must be previous PC+4. Control/system predecessors are excluded. Not an acceptance test or proof of a specific IF/WB root cause.'}
+              'retire_head': [],
+              'scope': 'Separate read-only replay: at most five PC/word mismatches or fallthrough sequence violations, plus the first up to eight retirements of each test. For retired load/store/ALU/LUI/AUIPC in this no-interrupt ISA, the next retired PC must be previous PC+4. Control/system predecessors are excluded. Not an acceptance test or proof of a specific IF/WB root cause.'}
     with tempfile.TemporaryDirectory(prefix='eda-retirement-observer-') as tmp:
         binary = Path(tmp) / 'observer.vvp'
         command = ['iverilog', '-g2012', *_cpu_feature_compile_flags(combined_path), '-I', str(teacher.parent),
@@ -136,6 +156,15 @@ def observe_retirement(*, project: dict, combined_path: Path, output_dir: Path) 
             return dict(result, status='unavailable', detail='Icarus tools unavailable')
     (output_dir / 'simulation.log').write_text(output, encoding='utf-8')
     for line in output.splitlines():
+        if line.startswith(HEAD_MARKER):
+            head = {}
+            for item in line[len(HEAD_MARKER):].split('|'):
+                key, separator, value = item.partition('=')
+                if separator:
+                    head[key] = value.strip()[:160]
+            if len(result['retire_head']) < 40:
+                result['retire_head'].append(head)
+            continue
         if line.startswith(MARKER):
             fields = {}
             for item in line[len(MARKER):].split('|'):

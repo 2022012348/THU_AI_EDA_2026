@@ -68,6 +68,7 @@ def _bus_counts(report: dict[str, Any]) -> dict[str, str]:
         parts = []
         for key, label in (("reads", "读"), ("writes", "写"),
                            ("retired_loads", "退休load"), ("retired_stores", "退休store"),
+                           ("retired", "退休总数"), ("adjacent_same", "相邻重复退休"),
                            ("waiting_cycles", "等待周期")):
             value = counts.get(key)
             if value is not None:
@@ -602,6 +603,8 @@ class ModifierAgent(SubAgent):
         validation_failures = 0
         context_requested = False
         patch_accepted = False
+        # 一次调用撞上输出上限时，整份补丁会被丢弃；允许降级为无思考重试一次。
+        truncated_once = False
         if probe_required and not current_probe_ok:
             messages[-1]['content'] += (
                 '\n本退休反例修复单必须先读取实际DUT波形来区分假设。第一次回复返回带ticket_id的request_observation，'
@@ -630,7 +633,8 @@ class ModifierAgent(SubAgent):
             call_messages = [dict(message) for message in messages]
             if evidence_block:
                 call_messages[-1]["content"] += evidence_block
-            evidence_reasoning = current_probe_ok and str(project.get('id') or '').startswith('rv32i5')
+            evidence_reasoning = (current_probe_ok and not truncated_once
+                                  and str(project.get('id') or '').startswith('rv32i5'))
             model_options = ({'thinking':True,'reasoning_effort':'low','max_tokens':16000}
                              if evidence_reasoning else self.MODEL_OPTIONS)
             event['model_mode']='evidence_reasoning' if evidence_reasoning else 'probe_planning_or_direct_repair'
@@ -638,6 +642,16 @@ class ModifierAgent(SubAgent):
                 result = self.runtime.call_model_messages(event, call_messages, model_options=model_options)
             except RuntimeError as error:
                 if getattr(error,'finish_reason',None)=='length' or event.get('finish_reason')=='length':
+                    if not truncated_once and parse_attempt < 3:
+                        # 思考模式吃掉了输出预算，补丁整体被截断。降级为无思考再试一次，
+                        # 而不是直接丢弃这一轮（否则等于白花一次调用）。
+                        truncated_once = True
+                        last_error = ValueError(
+                            '上一次输出因长度上限被截断，补丁未采纳；本次改用无思考模式，只返回最小 edits JSON。'
+                        )
+                        last_error_kind = 'truncated'
+                        event['modifier_output_truncated'] = True
+                        continue
                     raise InvalidModelRepair('模型输出触及本次上限；部分补丁未采纳，保留已测基线。') from error
                 raise
             answer = result.get("answer") or ""
